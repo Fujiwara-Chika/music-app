@@ -1,0 +1,14 @@
+.build/
+build/
+*.dmg
+.DS_Store
+__pycache__/
+*.pyc
+tools/click
+tools/scroll
+tools/winid
+
+# Scratch: reference crops and early icon candidates (regenerate with tools/)
+ref/
+Assets/icons/
+Assets/compare.png

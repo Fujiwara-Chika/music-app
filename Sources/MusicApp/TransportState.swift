@@ -1,0 +1,31 @@
+import SwiftUI
+import Foundation
+
+/// The three pieces of state that change while audio plays, split out of
+/// `PlayerEngine` so that SwiftUI only re-renders the views that actually show
+/// them.
+///
+/// `PlayerEngine` publishes rarely-changed things (current track, duration). If
+/// `progress` lived there too, every view holding the engine as an
+/// `@EnvironmentObject` — the whole window plus ~30 visible table rows — would be
+/// rebuilt 30 times a second, which cost about 34% CPU on its own.
+
+/// Elapsed time, updated 15×/s (the timer rate). Observed by the transport bar (seek bar + clock).
+@MainActor
+final class ProgressClock: ObservableObject {
+    @Published var progress: TimeInterval = 0
+}
+
+/// Spectrum bands, updated with the audio. Observed by the meter only.
+@MainActor
+final class SpectrumBands: ObservableObject {
+    @Published var values: [CGFloat] = Array(repeating: 0, count: SpectrumAnalyzer.bandCount)
+}
+
+/// Which track is playing, and whether it is playing. Changes on play/pause/track
+/// change only. Observed by the table rows (for the ▶ marker).
+@MainActor
+final class PlaybackCursor: ObservableObject {
+    @Published var trackID: UUID?
+    @Published var isPlaying: Bool = false
+}
