@@ -23,7 +23,7 @@ struct MusicAppMain: App {
                 .environmentObject(player.clock)
                 .environmentObject(player.bands)
                 .preferredColorScheme(.dark)
-                .background(Color.clear)
+                .background(Palette.reference.windowBG)
                 .frame(minWidth: 940, minHeight: 560)
         }
         .windowStyle(.hiddenTitleBar)
@@ -79,11 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // SwiftUI never routes the mouse-down there, and losing window dragging
             // would be a regression.
             window.isMovableByWindowBackground = true
-            // A real translucent window: the backdrop draws the cover and the
-            // palette wash, so anything below full opacity lets the desktop
-            // through instead of showing an opaque sheet.
-            window.isOpaque = false
-            window.backgroundColor = .clear
+            window.backgroundColor = NSColor(Palette.reference.windowBG)
             // The real traffic lights, in their usual place: a transparent title
             // bar with the system buttons is what makes a window read as macOS.
             window.styleMask.insert(.fullSizeContentView)
@@ -166,8 +162,7 @@ struct RootView: View {
             WindowBackdrop(
                 palette: shown,
                 artwork: appearance.usesArtworkBackdrop ? backdropArtwork : nil,
-                blur: appearance.backgroundBlur,
-                opacity: appearance.backgroundOpacity
+                blur: appearance.backgroundBlur
             )
         }
         .ignoresSafeArea(.container, edges: .top)
@@ -194,9 +189,7 @@ struct RootView: View {
         .onChange(of: player.currentTrack?.id) { _, _ in adoptCurrentPalette() }
         .onChange(of: theme.palette.token) { _, _ in
             // Keep the window itself in step, so resizing never reveals a seam.
-            // Stays clear: the backdrop paints the window, and a coloured window
-            // background would make the opacity slider do nothing.
-            NSApp.keyWindow?.backgroundColor = .clear
+            NSApp.keyWindow?.backgroundColor = NSColor(theme.palette.windowBG)
         }
         .onChange(of: store.selectedTrackID) { _, _ in adoptCurrentPalette() }
         // Covers decode in the background; when one lands the chrome has to

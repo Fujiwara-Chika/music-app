@@ -2,12 +2,13 @@ import AppKit
 import SwiftUI
 
 /// The layer behind everything: the current cover, blurred by the slider, with the
-/// palette's wash on top. At opacity 1.0 the wash is opaque, i.e. the old look.
+/// palette's wash on top. The cover itself stays opaque on purpose — the opacity
+/// slider is about how much of it you see through the surfaces above, not about
+/// letting the desktop through.
 struct WindowBackdrop: View {
     let palette: Palette
     let artwork: NSImage?
     let blur: Double
-    let opacity: Double
 
     var body: some View {
         ZStack {
@@ -19,10 +20,6 @@ struct WindowBackdrop: View {
                     .saturation(1.25)
                     .overlay(Color.black.opacity(0.22))
                     .clipped()
-                    // The slider has to reach the cover as well: while the image
-                    // was opaque the desktop could never show through it, no
-                    // matter how low the rest of the window went.
-                    .opacity(opacity)
             } else {
                 LinearGradient(
                     colors: [palette.controlBG, palette.windowBG],
