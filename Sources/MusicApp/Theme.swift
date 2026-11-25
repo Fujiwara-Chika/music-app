@@ -64,7 +64,6 @@ enum Metrics {
     static let topBarHeight: CGFloat   = 52
     static let headerRowHeight: CGFloat = 26
     static let rowHeight: CGFloat      = 35
-    static let compactRowHeight: CGFloat = 27
     static let sidebarWidth: CGFloat   = 160
     static let panelWidth: CGFloat     = 257
     static let transportHeight: CGFloat = 67

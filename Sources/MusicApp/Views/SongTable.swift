@@ -97,6 +97,7 @@ struct SongTable: View {
                         albumHeight: SongTableAlbumRow.height,
                         palette: palette,
                         scrollTarget: store.scrollTarget,
+                        revealToken: store.revealToken,
                         store: store,
                         player: player,
                         cursor: player.cursor,
@@ -124,8 +125,8 @@ struct SongTable: View {
                         .onChange(of: store.tracks.count) { _, _ in
                             store.prefetchThumbnails(maxPixel: SongTableAlbumRow.thumbPixels)
                         }
-                        .onChange(of: store.scrollTarget) { _, target in
-                            guard let target else { return }
+                        .onChange(of: store.revealToken) { _, _ in
+                            guard let target = store.scrollTarget else { return }
                             withAnimation(.easeInOut(duration: 0.28)) {
                                 proxy.scrollTo(target, anchor: .center)
                             }

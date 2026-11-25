@@ -62,15 +62,18 @@ final class LibraryStore: ObservableObject {
     let artworkTicker = ArtworkTicker()
     private var artworkUpgrades: Set<String> = []
     private var artworkUpgradePassStarted = false
-    @Published var isCompactRows = false
     /// Row id (`track:<uuid>`) the table should scroll into view. Row ids are
     /// strings because album headers are rows too.
     @Published var scrollTarget: String?
+    /// Bumped on every reveal request. Comparing `scrollTarget` alone is not
+    /// enough: asking to reveal the track that is already playing produces the
+    /// same string, so the request would be swallowed.
+    @Published private(set) var revealToken = 0
     /// When on, playback that moves to another track scrolls the table to it
     /// (auto-advance at the end of a song, next/previous, the top-bar button).
     @Published var followsPlayback = true
 
-    var rowHeight: CGFloat { isCompactRows ? Metrics.compactRowHeight : Metrics.rowHeight }
+    var rowHeight: CGFloat { Metrics.rowHeight }
 
     private var contentVersion = 0
     /// Incremented on every scan; a pass whose generation no longer matches has
@@ -775,6 +778,13 @@ final class LibraryStore: ObservableObject {
         let wanted = "track:" + trackID.uuidString
         guard force || followsPlayback, rows.contains(where: { $0.id == wanted }) else { return }
         scrollTarget = wanted
+        revealToken &+= 1
+    }
+
+    /// Programmatic "scroll here" used by the debug switches and the tests.
+    func requestScroll(to rowID: String) {
+        scrollTarget = rowID
+        revealToken &+= 1
     }
 
     // MARK: - Mutations

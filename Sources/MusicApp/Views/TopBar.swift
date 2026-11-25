@@ -73,12 +73,6 @@ struct TopBar: View {
                     store.reveal(trackID: id, force: true)
                 }
 
-                toolbarButton("rows", symbol: store.isCompactRows
-                                ? "rectangle.grid.2x2.fill" : "rectangle.grid.2x2",
-                              help: store.isCompactRows ? "切换回标准行高" : "切换紧凑行高") {
-                    withAnimation(.easeInOut(duration: 0.16)) { store.isCompactRows.toggle() }
-                }
-
                 optionsMenu
             }
         }
@@ -254,10 +248,6 @@ struct AppearancePanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            toggleRow("紧凑行高", isOn: Binding(
-                get: { store.isCompactRows },
-                set: { _ in withAnimation(.easeInOut(duration: 0.16)) { store.isCompactRows.toggle() } }
-            ))
             toggleRow("跟随播放滚动", isOn: $store.followsPlayback)
 
             Divider().padding(.vertical, 6)

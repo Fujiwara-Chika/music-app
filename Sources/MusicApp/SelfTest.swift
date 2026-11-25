@@ -114,6 +114,7 @@ enum SelfTest {
         let okSpectrum = checkSpectrum()
         let okRestore = checkPlaybackMemory()
         let okDerived = checkDerivedCache(store)
+        let okReveal = checkRevealRequests(store)
         let okRescan = checkRescanKeepsStats()
         let okIncremental = checkIncrementalScan()
         let okPlaylists = checkPlaylists(store)
@@ -124,11 +125,11 @@ enum SelfTest {
         let okPaletteAsync = checkPaletteAsyncArrival()
         let okPlaylistRoundTrip = checkPlaylistRoundTrip(store)
         let ok = okPlayback && okPause && okOrder && okSort && okCache && okGroups
-            && okModes && okPalette && okRestore && okSpectrum && okDerived && okRescan
+            && okModes && okPalette && okRestore && okSpectrum && okDerived && okRescan && okReveal
             && okIncremental
             && okPlaylists && okRowIDs && okPaletteAsync && okPlaylistRoundTrip && okEmptyScan
             && okOrdering
-        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental))")
+        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), reveal=\(okReveal))")
         exit(ok ? 0 : 1)
     }
 
@@ -213,6 +214,38 @@ enum SelfTest {
     /// A rescan must not re-read tags for files that did not change: that is the
     /// difference between 13-17s and 0.3s on a 5,800-track library. Touching one
     /// file's mtime must cost exactly one re-parse.
+    /// Asking to reveal the track that is already playing used to be swallowed:
+    /// the request was "scroll to <row id>", and the coordinator skipped it when
+    /// the id matched the previous request. Two reveals of the same track must
+    /// therefore bump the request token twice.
+    @MainActor
+    private static func checkRevealRequests(_ store: LibraryStore) -> Bool {
+        guard let track = store.allVisibleTracks.first(where: { $0.url != nil })
+                ?? store.allVisibleTracks.first else { return false }
+        store.selectedSection = .library
+        store.viewMode = .playlist
+        let before = store.revealToken
+
+        store.reveal(trackID: track.id, force: true)
+        let firstTarget = store.scrollTarget
+        let firstToken = store.revealToken
+
+        store.scrollTarget = nil          // what the coordinator does after scrolling
+        store.reveal(trackID: track.id, force: true)
+        let secondTarget = store.scrollTarget
+        let secondToken = store.revealToken
+
+        store.scrollTarget = nil
+        let rowID = "track:" + track.id.uuidString
+        let ok = firstTarget == rowID
+            && secondTarget == rowID
+            && firstToken == before &+ 1
+            && secondToken == before &+ 2
+        print("selftest: reveal — repeat request reaches the table: \(ok)"
+            + " (tokens \(before) → \(firstToken) → \(secondToken))")
+        return ok
+    }
+
     private static func checkIncrementalScan() -> Bool {
         let fm = FileManager.default
         let folder = URL(fileURLWithPath: NSTemporaryDirectory())

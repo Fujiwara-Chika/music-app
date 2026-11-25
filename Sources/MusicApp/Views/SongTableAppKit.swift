@@ -17,6 +17,9 @@ struct SongTableAppKit: NSViewRepresentable {
     /// Row id to bring into view. Passed in as a value so SwiftUI re-runs
     /// `updateNSView` when the "locate playing" request changes.
     let scrollTarget: String?
+    /// Request counter from `LibraryStore.reveal`; the row id alone cannot tell a
+    /// repeat request apart from an already-handled one.
+    let revealToken: Int
 
     let store: LibraryStore
     let player: PlayerEngine
@@ -98,11 +101,12 @@ struct SongTableAppKit: NSViewRepresentable {
             revealTargetIfNeeded()
         }
 
-        private var lastRevealedTarget: String?
+        private var lastRevealedToken = -1
         private func revealTargetIfNeeded() {
-            guard let table, let target = parent.scrollTarget, target != lastRevealedTarget else { return }
+            guard let table, let target = parent.scrollTarget,
+                  parent.revealToken != lastRevealedToken else { return }
             guard let index = parent.rows.firstIndex(where: { $0.id == target }) else { return }
-            lastRevealedTarget = target
+            lastRevealedToken = parent.revealToken
             // `scrollRowToVisible` silently does nothing here (view-based rows,
             // custom heights), so scroll the clip view explicitly.
             table.layoutSubtreeIfNeeded()

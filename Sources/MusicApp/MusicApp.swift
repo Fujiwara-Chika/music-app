@@ -239,7 +239,7 @@ struct RootView: View {
                 let rows = store.rows
                 guard !rows.isEmpty else { return }
                 let target = min(rows.count - 1, max(0, Int(value * Double(rows.count - 1))))
-                store.scrollTarget = rows[target].id
+                store.requestScroll(to: rows[target].id)
             }
         }
 
