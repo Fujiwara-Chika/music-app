@@ -103,6 +103,7 @@ enum IconPreview {
         }
         let view = RootView(paletteOverride: override)
             .environmentObject(store)
+            .environmentObject(store.artworkTicker)
             .environmentObject(player)
             .environmentObject(player.cursor)
             .environmentObject(player.clock)

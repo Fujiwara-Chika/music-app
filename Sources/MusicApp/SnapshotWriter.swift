@@ -165,6 +165,38 @@ final class SnapshotWriter {
         return artworkDirectory.appendingPathComponent(name).appendingPathExtension("jpg")
     }
 
+    /// Decodes a cover straight to the size the caller will draw it at.
+    ///
+    /// The cache keeps 768px JPEGs so the panel stays sharp, but a 62pt table
+    /// thumbnail drawn from a 768px bitmap means every visible album header costs
+    /// a 2.36 MB decode plus a per-frame 6× downscale on the GPU. ImageIO can
+    /// decode JPEG straight to a small bitmap, which is both cheaper and sharper
+    /// than letting Core Animation do it.
+    func readArtwork(for albumKey: String, maxPixel: Int) -> NSImage? {
+        let url = artworkURL(for: albumKey)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return Self.thumbnail(from: data, maxPixel: maxPixel)
+    }
+
+    /// `nil` when the bytes are not a decodable image.
+    static func thumbnail(from data: Data, maxPixel: Int) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel
+        ]
+        guard var cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        if let srgb = CGColorSpace(name: CGColorSpace.sRGB), cg.colorSpace?.name != srgb.name,
+           let converted = cg.copy(colorSpace: srgb) {
+            cg = converted
+        }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+
     func readArtwork(for albumKey: String) -> NSImage? {
         let url = artworkURL(for: albumKey)
         guard let data = try? Data(contentsOf: url), let image = NSImage(data: data) else { return nil }

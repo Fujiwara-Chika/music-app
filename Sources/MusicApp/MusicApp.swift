@@ -17,6 +17,7 @@ struct MusicAppMain: App {
         WindowGroup {
             RootView()
                 .environmentObject(store)
+            .environmentObject(store.artworkTicker)
                 .environmentObject(player)
                 .environmentObject(player.cursor)
                 .environmentObject(player.clock)
@@ -153,7 +154,7 @@ struct RootView: View {
         .onChange(of: store.selectedTrackID) { _, _ in adoptCurrentPalette() }
         // Covers decode in the background; when one lands the chrome has to
         // re-derive or a cold start would stay navy for the whole session.
-        .onChange(of: store.artworkRevision) { _, _ in adoptCurrentPalette() }
+        .onChange(of: store.artworkTicker.revision) { _, _ in adoptCurrentPalette() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             player.persistPlayback(force: true)
             // The library snapshot is debounced by 2s, so a playlist or rating

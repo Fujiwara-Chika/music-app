@@ -110,6 +110,12 @@ struct SongTable: View {
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(palette.windowBG)
+                        .onAppear {
+                            store.prefetchThumbnails(maxPixel: SongTableAlbumRow.thumbPixels)
+                        }
+                        .onChange(of: store.tracks.count) { _, _ in
+                            store.prefetchThumbnails(maxPixel: SongTableAlbumRow.thumbPixels)
+                        }
                         .onChange(of: store.scrollTarget) { _, target in
                             guard let target else { return }
                             withAnimation(.easeInOut(duration: 0.28)) {
@@ -282,6 +288,7 @@ private struct SongTableAlbumRow: View {
     let group: AlbumGroup
 
     @EnvironmentObject private var store: LibraryStore
+    @EnvironmentObject private var artworkTicker: ArtworkTicker
 
     var body: some View {
         HStack(spacing: 0) {
@@ -332,9 +339,18 @@ private struct SongTableAlbumRow: View {
     /// 50% taller than the screenshot, so the height is derived from the cover.
     static let height: CGFloat = Metrics.coverThumb + 8
 
+    /// 62pt at 2× with a little headroom for the 1pt border.
+    static let thumbPixels: Int = Int(Metrics.coverThumb * 2) + 8
+
     @ViewBuilder
     private var cover: some View {
-        if let image = store.artwork(for: group.albumKey) {
+        // Reading the ticker registers the dependency: without it this header
+        // would never redraw when its thumbnail finishes decoding (the bump no
+        // longer goes through `store`, precisely so rows do not all rebuild).
+        let _ = artworkTicker.revision
+        // Thumbnail size, not the 768px file: the cell is 62pt wide, so decoding
+        // the full cover only to scale it down 6× was both slower and softer.
+        if let image = store.thumbnail(for: group.albumKey, maxPixel: Self.thumbPixels) {
             Image(nsImage: image)
                 .resizable()
                 .aspectRatio(contentMode: .fill)

@@ -29,3 +29,14 @@ final class PlaybackCursor: ObservableObject {
     @Published var trackID: UUID?
     @Published var isPlaying: Bool = false
 }
+
+/// Bumped when a cover bitmap lands. Kept out of `LibraryStore` on purpose: the
+/// store is observed by every visible row, so publishing "a thumbnail decoded"
+/// there would rebuild the whole table dozens of times per scroll (each newly
+/// revealed album decodes one). Only cover views subscribe to this.
+@MainActor
+final class ArtworkTicker: ObservableObject {
+    @Published private(set) var revision = 0
+
+    func bump() { revision &+= 1 }
+}

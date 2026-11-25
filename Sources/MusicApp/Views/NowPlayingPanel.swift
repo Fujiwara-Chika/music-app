@@ -8,6 +8,7 @@ import AppKit
 struct NowPlayingPanel: View {
 @Environment(\.palette) private var palette
     @EnvironmentObject private var store: LibraryStore
+@EnvironmentObject private var artworkTicker: ArtworkTicker
     @EnvironmentObject private var player: PlayerEngine
 
     /// Ratings applied to a track that is playing but is not part of the library.
@@ -55,7 +56,7 @@ struct NowPlayingPanel: View {
 
     var body: some View {
         panel
-            .onChange(of: store.artworkRevision) { _, _ in
+            .onChange(of: artworkTicker.revision) { _, _ in
                 loadedArtwork = track.flatMap { store.artwork(for: $0.albumKey) }
             }
             .task(id: track?.albumKey) {

@@ -58,7 +58,8 @@ final class LibraryStore: ObservableObject {
     /// table groups rows (album / artist / genre / play statistics).
     @Published var viewMode: ViewMode = .playlist
     /// Bumped whenever a cover image is replaced, so views showing artwork redraw.
-    @Published private(set) var artworkRevision = 0
+    /// Decoded-cover notifications live on their own publisher; see `ArtworkTicker`.
+    let artworkTicker = ArtworkTicker()
     private var artworkUpgrades: Set<String> = []
     private var artworkUpgradePassStarted = false
     @Published var isCompactRows = false
@@ -85,6 +86,16 @@ final class LibraryStore: ObservableObject {
     }()
     private var artworkMissing: Set<String> = []
     private var artworkLoading: Set<String> = []
+    /// Row-sized covers, keyed `albumKey@side`. Kept apart from `artworkCache`
+    /// because a 124px thumbnail is ~60 KB against the full cover's 2.36 MB, and
+    /// the table asks for dozens of them while scrolling.
+    private let thumbnailCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 600
+        return cache
+    }()
+    /// Thumbnails currently being decoded.
+    private var thumbnailLoading: Set<String> = []
     /// Last fully-published library. `tracks` itself is published in slices while
     /// a scan runs, so a rescan must not take its "previous" state from there.
     private var lastCompleteTracks: [Track] = []
@@ -498,7 +509,7 @@ final class LibraryStore: ObservableObject {
     /// Non-blocking lookup used by the scrolling UI.
     ///
     /// The first call for a cover returns nil and kicks off a background decode;
-    /// the bitmap arrives through `artworkRevision`. `artworkMissing` is a real
+    /// the bitmap arrives through `artworkTicker`. `artworkMissing` is a real
     /// negative cache (the album has no cover at all) and `artworkLoading` keeps
     /// repeated `body` evaluations from stacking up decodes for the same album.
     func artwork(for albumKey: String) -> NSImage? {
@@ -512,7 +523,7 @@ final class LibraryStore: ObservableObject {
             artworkLoading.remove(albumKey)
             if let image {
                 store(image, for: albumKey)
-                artworkRevision &+= 1
+                artworkTicker.bump()
             } else if isDemoLibrary {
                 artworkMissing.insert(albumKey)
             } else {
@@ -522,6 +533,80 @@ final class LibraryStore: ObservableObject {
             }
         }
         return nil
+    }
+
+    /// Cover decoded straight to `maxPixel`, for the table's 62pt thumbnails.
+    /// Returns whatever is cached and kicks off a decode the first time, exactly
+    /// like `artwork(for:)` — the row shows its placeholder for a frame or two.
+    func thumbnail(for albumKey: String, maxPixel: Int) -> NSImage? {
+        let key = "\(albumKey)@\(maxPixel)"
+        if let image = thumbnailCache.object(forKey: key as NSString) { return image }
+        // The full cover may already be in memory: downscaling that is cheap and
+        // avoids touching the disk again.
+        if let full = artworkCache.object(forKey: albumKey as NSString) {
+            let image = Self.downscaled(full, maxPixel: maxPixel)
+            if let image { thumbnailCache.setObject(image, forKey: key as NSString) }
+            return image
+        }
+        // The offscreen renderer has no run loop, so the async decode below would
+        // never land: read the thumbnail synchronously instead.
+        if RenderMode.isOffscreen {
+            guard let image = cache.readArtwork(for: albumKey, maxPixel: maxPixel) else { return nil }
+            thumbnailCache.setObject(image, forKey: key as NSString)
+            return image
+        }
+        guard !artworkMissing.contains(albumKey), !thumbnailLoading.contains(key) else { return nil }
+        thumbnailLoading.insert(key)
+        Task {
+            let image = await decodeThumbnail(for: albumKey, maxPixel: maxPixel)
+            thumbnailLoading.remove(key)
+            if let image {
+                thumbnailCache.setObject(image, forKey: key as NSString)
+                artworkTicker.bump()
+            } else {
+                refreshArtwork(albumKey, ifSmallerThan: .infinity, markingMissingOnFailure: true)
+            }
+        }
+        return nil
+    }
+
+    private func decodeThumbnail(for albumKey: String, maxPixel: Int) async -> NSImage? {
+        let cache = self.cache
+        return await Task.detached(priority: .userInitiated) {
+            ArtworkBox(image: cache.readArtwork(for: albumKey, maxPixel: maxPixel))
+        }.value.image
+    }
+
+    /// Downscale an in-memory cover to a square thumbnail.
+    private static func downscaled(_ image: NSImage, maxPixel: Int) -> NSImage? {
+        var rect = CGRect(origin: .zero, size: image.size)
+        guard let cg = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return nil }
+        guard cg.width > maxPixel || cg.height > maxPixel else { return image }
+        let scale = CGFloat(maxPixel) / CGFloat(max(cg.width, cg.height))
+        let width = max(1, Int((CGFloat(cg.width) * scale).rounded()))
+        let height = max(1, Int((CGFloat(cg.height) * scale).rounded()))
+        guard let context = CGContext(data: nil, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.interpolationQuality = .high
+        context.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let scaled = context.makeImage() else { return nil }
+        return NSImage(cgImage: scaled, size: NSSize(width: width, height: height))
+    }
+
+    /// Warms the thumbnail cache for the next `limit` album headers. Called when
+    /// the table appears and when the library changes, so scrolling into the
+    /// second screenful does not show placeholders while covers decode.
+    func prefetchThumbnails(maxPixel: Int, limit: Int = 48) {
+        var seen: Set<String> = []
+        for row in rows {
+            guard seen.count < limit, let key = row.group?.albumKey, seen.insert(key).inserted else { continue }
+            let cacheKey = "\(key)@\(maxPixel)"
+            guard thumbnailCache.object(forKey: cacheKey as NSString) == nil,
+                  !thumbnailLoading.contains(cacheKey) else { continue }
+            _ = thumbnail(for: key, maxPixel: maxPixel)
+        }
     }
 
     /// Blocking lookup for the offscreen renderer and tests, where there is no
@@ -582,7 +667,7 @@ final class LibraryStore: ObservableObject {
             }
             cache.writeArtwork(fresh, for: albumKey)
             store(fresh, for: albumKey)
-            artworkRevision &+= 1
+            artworkTicker.bump()
         }
     }
 
@@ -604,12 +689,12 @@ final class LibraryStore: ObservableObject {
                 store(fresh, for: albumKey)
                 done += 1
                 if done % 8 == 0 {
-                    artworkRevision &+= 1
+                    artworkTicker.bump()
                     await Task.yield()
                 }
             }
             if done > 0 {
-                artworkRevision &+= 1
+                artworkTicker.bump()
                 NSLog("音乐: upgraded %d cached covers", done)
             }
         }
@@ -1077,6 +1162,8 @@ final class LibraryStore: ObservableObject {
             // Nothing is on screen any more, so drop the decoded covers too
             // instead of letting them squat in the 96 MB cache.
             artworkCache.removeAllObjects()
+            thumbnailCache.removeAllObjects()
+            thumbnailLoading.removeAll()
             artworkMissing.removeAll()
             artworkLoading.removeAll()
             artworkUpgrades.removeAll()
