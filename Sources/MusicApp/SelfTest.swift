@@ -119,6 +119,7 @@ enum SelfTest {
         let okRescan = checkRescanKeepsStats()
         let okIncremental = checkIncrementalScan()
         let okUpgrade = checkSnapshotUpgrade(store)
+        let okUpgradeScan = checkSnapshotUpgradeEndToEnd()
         let okPlaylists = checkPlaylists(store)
         let okEmptyScan = checkEmptyScanPersists()
         let okOrdering = checkSnapshotOrdering()
@@ -128,10 +129,10 @@ enum SelfTest {
         let okPlaylistRoundTrip = checkPlaylistRoundTrip(store)
         let ok = okPlayback && okPause && okOrder && okSort && okCache && okGroups
             && okModes && okPalette && okRestore && okSpectrum && okDerived && okRescan && okReveal && okDiscLabels
-            && okIncremental && okUpgrade
+            && okIncremental && okUpgrade && okUpgradeScan
             && okPlaylists && okRowIDs && okPaletteAsync && okPlaylistRoundTrip && okEmptyScan
             && okOrdering
-        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), upgrade=\(okUpgrade), reveal=\(okReveal), disclabels=\(okDiscLabels))")
+        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), reveal=\(okReveal), disclabels=\(okDiscLabels))")
         exit(ok ? 0 : 1)
     }
 
@@ -364,6 +365,79 @@ enum SelfTest {
         print("selftest: upgrade — v1 loads=\(true), stats=\(keptStats), playlists=\(keptPlaylists), "
               + "stale=\(markedStale), newer-refused=\(refusedFuture)")
         return keptStats && keptPlaylists && markedStale && refusedFuture
+    }
+
+    /// The real upgrade path: a v1 snapshot on disk, a fresh `LibraryStore` that
+    /// adopts it and then rescans because it is stale. Only this exercises
+    /// `init → apply → scan`, which is where the statistics used to be lost.
+    private static func checkSnapshotUpgradeEndToEnd() -> Bool {
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("music-selftest-upgrade-e2e-\(UUID().uuidString)", isDirectory: true)
+        let music = root.appendingPathComponent("music", isDirectory: true)
+        let cacheDir = root.appendingPathComponent("cache", isDirectory: true)
+        try? fm.createDirectory(at: music, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        var paths: [String] = []
+        for index in 1...3 {
+            guard let url = makeTestAudio(in: music, name: "up-\(index).wav") else {
+                print("selftest: upgrade e2e — FAIL could not write test audio")
+                return false
+            }
+            paths.append(url.path)
+        }
+
+        // Let the app's own scanner produce the tracks first: their URLs are the
+        // exact strings a later scan will look up again, including the /private
+        // prefix NSTemporaryDirectory hides behind a symlink.
+        let first = LibraryStore(autoLoad: false, cache: SnapshotWriter(directory: cacheDir))
+        var scanned = false
+        Task { @MainActor in await first.scan(folder: music); scanned = true }
+        wait(until: { scanned }, timeout: 30)
+        guard first.tracks.count == 3 else {
+            print("selftest: upgrade e2e — FAIL first scan made \(first.tracks.count) tracks")
+            return false
+        }
+
+        // Downgrade that snapshot to v1 and mark one song as played five times.
+        var old = LibrarySnapshot(folderPath: music.path, savedAt: Date(), tracks: first.tracks.map { track in
+            var copy = track
+            copy.playCount = track.url?.lastPathComponent == "up-2.wav" ? 5 : 0
+            copy.fileMtime = nil
+            copy.fileSize = nil
+            return copy
+        })
+        old.version = 1
+        old.playlists = [Playlist(name: "旧歌单")]
+        SnapshotWriter(directory: cacheDir).flush(old)
+
+        let defaults = UserDefaults.standard
+        let previous = defaults.string(forKey: LibraryStore.folderKey)
+        defaults.set(music.path, forKey: LibraryStore.folderKey)
+        defer {
+            if let previous { defaults.set(previous, forKey: LibraryStore.folderKey) }
+            else { defaults.removeObject(forKey: LibraryStore.folderKey) }
+        }
+
+        let store = LibraryStore(autoLoad: true, cache: SnapshotWriter(directory: cacheDir))
+        let deadline = Date().addingTimeInterval(30)
+        while store.tracks.count < 3 && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        // Give the scan's final apply a moment to land the merged statistics.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+
+        let resolved = store.tracks.count == 3
+        let counted = store.tracks.contains { $0.playCount == 5 }
+        let playlists = store.playlists.count == 1
+        // A v1 snapshot must be *rescanned*, not just loaded: that is the whole
+        // point of marking it stale (v1 saved every multi-disc album as disc 1).
+        let rescanned = store.metadataReads == 3
+        print("selftest: upgrade e2e — tracks=\(store.tracks.count), playcount-kept=\(counted), "
+              + "playlists=\(playlists), rescanned=\(store.metadataReads)")
+        return resolved && counted && playlists && rescanned
     }
 
     private static func checkRescanKeepsStats() -> Bool {

@@ -19,6 +19,10 @@ struct WindowBackdrop: View {
                     .saturation(1.25)
                     .overlay(Color.black.opacity(0.22))
                     .clipped()
+                    // The slider has to reach the cover as well: while the image
+                    // was opaque the desktop could never show through it, no
+                    // matter how low the rest of the window went.
+                    .opacity(opacity)
             } else {
                 LinearGradient(
                     colors: [palette.controlBG, palette.windowBG],

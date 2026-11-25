@@ -56,7 +56,7 @@ struct NowPlayingPanel: View {
 
     var body: some View {
         panel
-            .onChange(of: artworkTicker.revision) { _, _ in
+            .onChange(of: artworkTicker.revision(for: (player.currentTrack ?? store.selectedTrack)?.albumKey ?? "")) { _, _ in
                 loadedArtwork = track.flatMap { store.artwork(for: $0.albumKey) }
             }
             .task(id: track?.albumKey) {

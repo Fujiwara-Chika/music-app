@@ -22,6 +22,12 @@ struct SongTableAppKit: NSViewRepresentable {
     /// and first/last ids are not enough: a re-sort keeps both while every row in
     /// between moves.
     let derivedRebuilds: Int
+
+    /// Everything the rows paint from, in one string. The parent view is rebuilt
+    /// by far more than the rows care about — a volume drag publishes 60 times a
+    /// second, and an appearance slider publishes on every pixel — so the table
+    /// compares this instead of reloading on every SwiftUI update.
+    let renderToken: String
     /// Request counter from `LibraryStore.reveal`; the row id alone cannot tell a
     /// repeat request apart from an already-handled one.
     let revealToken: Int
@@ -98,15 +104,19 @@ struct SongTableAppKit: NSViewRepresentable {
                 let scrollY = table.enclosingScrollView?.contentView.bounds.origin ?? .zero
                 table.reloadData()
                 table.enclosingScrollView?.contentView.scroll(to: scrollY)
-            } else if let visible = table.rows(in: table.visibleRect) as NSRange?, visible.length > 0 {
+                renderToken = next.renderToken
+            } else if next.renderToken != renderToken,
+                      let visible = table.rows(in: table.visibleRect) as NSRange?, visible.length > 0 {
                 // Selection, playback state and artwork arrive here: refresh the
                 // visible rows only.
                 table.reloadData(forRowIndexes: IndexSet(integersIn: visible.location..<(visible.location + visible.length)),
                                  columnIndexes: IndexSet(integer: 0))
+                renderToken = next.renderToken
             }
             revealTargetIfNeeded()
         }
 
+        private var renderToken = ""
         private var lastRevealedToken = -1
         private func revealTargetIfNeeded() {
             guard let table, let target = parent.scrollTarget,

@@ -80,6 +80,16 @@ struct SongTable: View {
 
     @EnvironmentObject private var store: LibraryStore
 
+    /// See `SongTableAppKit.renderToken`. Kept here so both containers agree on
+    /// what counts as "the rows changed".
+    private func renderToken(columns: SongTableColumns, cursor: PlaybackCursor) -> String {
+        var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
+        token += "|\(cursor.trackID?.uuidString ?? "")"
+        token += "|\(store.selectedTrackID?.uuidString ?? "")"
+        token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
+        return token
+    }
+
     var body: some View {
         let rows = store.rows
 
@@ -109,6 +119,7 @@ struct SongTable: View {
                         palette: palette,
                         scrollTarget: store.scrollTarget,
                         derivedRebuilds: store.derivedRebuilds,
+                        renderToken: renderToken(columns: columns, cursor: cursor),
                         revealToken: store.revealToken,
                         store: store,
                         actions: actions,
@@ -162,6 +173,16 @@ private struct SongTableHeader: View {
 
     @EnvironmentObject private var store: LibraryStore
 
+    /// See `SongTableAppKit.renderToken`. Kept here so both containers agree on
+    /// what counts as "the rows changed".
+    private func renderToken(columns: SongTableColumns, cursor: PlaybackCursor) -> String {
+        var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
+        token += "|\(cursor.trackID?.uuidString ?? "")"
+        token += "|\(store.selectedTrackID?.uuidString ?? "")"
+        token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
+        return token
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             Color.clear
@@ -211,6 +232,16 @@ private struct SongTableHeader: View {
     @Environment(\.palette) private var palette
         let columns: SongTableColumns
         @EnvironmentObject private var store: LibraryStore
+
+    /// See `SongTableAppKit.renderToken`. Kept here so both containers agree on
+    /// what counts as "the rows changed".
+    private func renderToken(columns: SongTableColumns, cursor: PlaybackCursor) -> String {
+        var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
+        token += "|\(cursor.trackID?.uuidString ?? "")"
+        token += "|\(store.selectedTrackID?.uuidString ?? "")"
+        token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
+        return token
+    }
 
         var body: some View {
             HStack(spacing: 0) {
@@ -310,6 +341,16 @@ struct SongTableAlbumRow: View {
     let group: AlbumGroup
 
     @EnvironmentObject private var store: LibraryStore
+
+    /// See `SongTableAppKit.renderToken`. Kept here so both containers agree on
+    /// what counts as "the rows changed".
+    private func renderToken(columns: SongTableColumns, cursor: PlaybackCursor) -> String {
+        var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
+        token += "|\(cursor.trackID?.uuidString ?? "")"
+        token += "|\(store.selectedTrackID?.uuidString ?? "")"
+        token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
+        return token
+    }
     /// Owned by this row: a decoded cover updates one header, not the table.
     @State private var thumb: NSImage?
     /// Which album the cached thumbnail belongs to; states survive cell reuse.
@@ -414,6 +455,16 @@ struct SongTableTrackRow: View {
     let columns: SongTableColumns
 
     @EnvironmentObject private var store: LibraryStore
+
+    /// See `SongTableAppKit.renderToken`. Kept here so both containers agree on
+    /// what counts as "the rows changed".
+    private func renderToken(columns: SongTableColumns, cursor: PlaybackCursor) -> String {
+        var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
+        token += "|\(cursor.trackID?.uuidString ?? "")"
+        token += "|\(store.selectedTrackID?.uuidString ?? "")"
+        token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
+        return token
+    }
     @EnvironmentObject private var cursor: PlaybackCursor
 
     /// Actions arrive as closures so the row never observes `PlayerEngine`; that
@@ -553,6 +604,16 @@ struct SongTableTrackRow: View {
 private struct SongTableEmptyState: View {
 @Environment(\.palette) private var palette
     @EnvironmentObject private var store: LibraryStore
+
+    /// See `SongTableAppKit.renderToken`. Kept here so both containers agree on
+    /// what counts as "the rows changed".
+    private func renderToken(columns: SongTableColumns, cursor: PlaybackCursor) -> String {
+        var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
+        token += "|\(cursor.trackID?.uuidString ?? "")"
+        token += "|\(store.selectedTrackID?.uuidString ?? "")"
+        token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
+        return token
+    }
 
     var body: some View {
         VStack(spacing: 12) {

@@ -25,9 +25,28 @@ final class PlayerEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
             let clamped = min(max(volume, 0), 1)
             if clamped != volume { volume = clamped; return }
             player?.volume = Float(volume)
-            UserDefaults.standard.set(volume, forKey: Self.volumeKey)
+            scheduleVolumePersist()
         }
     }
+    /// Flushes the deferred volume write; called on quit so closing the app right
+    /// after a drag does not lose the setting.
+    func flushVolume() {
+        volumePersistWork?.cancel()
+        UserDefaults.standard.set(volume, forKey: Self.volumeKey)
+    }
+
+    /// Dragging the slider publishes on every frame; writing `UserDefaults` that
+    /// often is pure overhead, so the write is deferred until the value settles
+    /// (and repeated on quit, in case the app is closed mid-drag).
+    private var volumePersistWork: DispatchWorkItem?
+    private func scheduleVolumePersist() {
+        volumePersistWork?.cancel()
+        let value = volume
+        let work = DispatchWorkItem { UserDefaults.standard.set(value, forKey: Self.volumeKey) }
+        volumePersistWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
     /// High-frequency state lives in separate objects so that observing the engine
     /// does not redraw the whole window on every tick.
     override init() {

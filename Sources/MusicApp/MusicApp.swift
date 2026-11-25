@@ -118,7 +118,8 @@ struct RootView: View {
     /// the global artwork ticker would re-render the whole window every time a
     /// row's cover finished decoding.
     private var backdropKey: String {
-        (player.currentTrack ?? store.selectedTrack)?.albumKey ?? ""
+        let album = (player.currentTrack ?? store.selectedTrack)?.albumKey ?? ""
+        return album + (appearance.usesArtworkBackdrop ? "#on" : "#off")
     }
 
     /// Restoring runs once, as soon as the library has tracks to match against.
@@ -203,6 +204,7 @@ struct RootView: View {
         .onChange(of: store.artworkTicker.revision) { _, _ in adoptCurrentPalette() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             player.persistPlayback(force: true)
+            player.flushVolume()
             // The library snapshot is debounced by 2s, so a playlist or rating
             // made just before ⌘Q would otherwise never reach the disk.
             store.flushSnapshot()

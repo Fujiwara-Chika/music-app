@@ -104,7 +104,8 @@ final class LibraryStore: ObservableObject {
     private var lastCompleteTracks: [Track] = []
     private var saveTask: Task<Void, Never>?
     private let defaults = UserDefaults.standard
-    private let folderKey = "library.folder.path"
+    /// Exposed so the self-test can point a store at a scratch folder.
+    static let folderKey = "library.folder.path"
     /// Stable `path → id` map, independent of what the last scan happened to
     /// see. `lastCompleteTracks` cannot serve this purpose: an empty scan wipes
     /// it, which is exactly when playlist membership needs the ids back.
@@ -141,7 +142,7 @@ final class LibraryStore: ObservableObject {
         // The demo albums exist only to match the reference screenshot, and they
         // have no audio behind them, so they must never be what a fresh install
         // opens with — the menu item 「载入示例资料库」 loads them on request.
-        guard let path = defaults.string(forKey: folderKey) else { return }
+        guard let path = defaults.string(forKey: Self.folderKey) else { return }
         // Opening the window must not walk 5,800 files. The snapshot written by
         // the last scan is used until the user asks for a rescan (⌘R).
         if let snapshot = cache.load(), snapshot.folderPath == path {
@@ -216,7 +217,7 @@ final class LibraryStore: ObservableObject {
 
     /// Force a fresh walk of the imported folder and rewrite the snapshot.
     func rescan() {
-        guard let path = defaults.string(forKey: folderKey) else { return }
+        guard let path = defaults.string(forKey: Self.folderKey) else { return }
         Task { await self.scan(folder: URL(fileURLWithPath: path)) }
     }
 
@@ -569,7 +570,7 @@ final class LibraryStore: ObservableObject {
             artworkLoading.remove(albumKey)
             if let image {
                 store(image, for: albumKey)
-                artworkTicker.bump()
+                artworkTicker.bump(album: albumKey)
             } else if isDemoLibrary {
                 artworkMissing.insert(albumKey)
             } else {
@@ -608,7 +609,7 @@ final class LibraryStore: ObservableObject {
             thumbnailLoading.remove(key)
             if let image {
                 thumbnailCache.setObject(image, forKey: key as NSString)
-                artworkTicker.bump()
+                artworkTicker.bump(album: albumKey)
                 // Once the prefetch burst is done, return the decoder's pages.
                 if thumbnailLoading.isEmpty { scheduleMemoryRelief() }
             } else {
@@ -761,7 +762,7 @@ final class LibraryStore: ObservableObject {
             }
             cache.writeArtwork(fresh, for: albumKey)
             store(fresh, for: albumKey)
-            artworkTicker.bump()
+            artworkTicker.bump(album: albumKey)
         }
     }
 
@@ -783,12 +784,12 @@ final class LibraryStore: ObservableObject {
                 store(fresh, for: albumKey)
                 done += 1
                 if done % 8 == 0 {
-                    artworkTicker.bump()
+                    artworkTicker.bump(album: albumKey)
                     await Task.yield()
                 }
             }
             if done > 0 {
-                artworkTicker.bump()
+                artworkTicker.bump(album: "")
                 NSLog("音乐: upgraded %d cached covers", done)
             }
         }
@@ -869,7 +870,7 @@ final class LibraryStore: ObservableObject {
         // While a scan runs, `tracks` holds only the batches published so far;
         // writing that would leave the next launch with a truncated library.
         guard !isDemoLibrary, !isScanning else { return }
-        guard let path = activeFolderPath ?? defaults.string(forKey: folderKey) else { return }
+        guard let path = activeFolderPath ?? defaults.string(forKey: Self.folderKey) else { return }
         saveTask?.cancel()
         saveTask = nil
         cache.flush(LibrarySnapshot(folderPath: path, savedAt: Date(),
@@ -881,7 +882,7 @@ final class LibraryStore: ObservableObject {
     /// snapshot after every click would thrash the disk, so writes are debounced.
     private func scheduleSave() {
         guard !isDemoLibrary, !isScanning else { return }
-        guard let path = activeFolderPath ?? defaults.string(forKey: folderKey) else { return }
+        guard let path = activeFolderPath ?? defaults.string(forKey: Self.folderKey) else { return }
         saveTask?.cancel()
         let snapshot = LibrarySnapshot(folderPath: path, savedAt: Date(),
                                        tracks: tracks, playlists: playlists,
@@ -957,13 +958,13 @@ final class LibraryStore: ObservableObject {
         panel.prompt = "扫描"
         panel.message = "选择一个音乐文件夹"
         if panel.runModal() == .OK, let url = panel.url {
-            defaults.set(url.path, forKey: folderKey)
+            defaults.set(url.path, forKey: Self.folderKey)
             Task { await self.scan(folder: url) }
         }
     }
 
     func clearImportedLibrary() {
-        defaults.removeObject(forKey: folderKey)
+        defaults.removeObject(forKey: Self.folderKey)
         // A debounced save from a moment ago would otherwise write the old
         // library back after the files are gone.
         saveTask?.cancel()
@@ -1137,7 +1138,7 @@ final class LibraryStore: ObservableObject {
         let normalized = { (path: String?) -> String? in
             path.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
         }
-        let isSameFolder = normalized(activeFolderPath ?? defaults.string(forKey: folderKey))
+        let isSameFolder = normalized(activeFolderPath ?? defaults.string(forKey: Self.folderKey))
             == normalized(folder.path)
         activeFolderPath = folder.path
         if !isSameFolder {
@@ -1286,7 +1287,7 @@ final class LibraryStore: ObservableObject {
             artworkMissing.removeAll()
             artworkLoading.removeAll()
             artworkUpgrades.removeAll()
-            if let path = activeFolderPath ?? defaults.string(forKey: folderKey) {
+            if let path = activeFolderPath ?? defaults.string(forKey: Self.folderKey) {
                 saveTask?.cancel()
                 saveTask = nil
                 cache.write(LibrarySnapshot(folderPath: path, savedAt: Date(),

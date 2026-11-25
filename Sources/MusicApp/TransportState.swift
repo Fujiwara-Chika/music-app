@@ -37,6 +37,16 @@ final class PlaybackCursor: ObservableObject {
 @MainActor
 final class ArtworkTicker: ObservableObject {
     @Published private(set) var revision = 0
+    /// Per-album counters: a panel that shows one cover should not refresh when
+    /// some unrelated row's thumbnail lands.
+    private var perAlbum: [String: Int] = [:]
 
     func bump() { revision &+= 1 }
+
+    func bump(album key: String) {
+        revision &+= 1
+        perAlbum[key, default: 0] &+= 1
+    }
+
+    func revision(for key: String) -> Int { perAlbum[key] ?? 0 }
 }
