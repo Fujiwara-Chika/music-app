@@ -13,11 +13,34 @@ final class PlayerEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var playMode: PlayMode = PlayMode(rawValue: UserDefaults.standard.integer(forKey: PlayMode.storageKey)) ?? .sequential {
         didSet { UserDefaults.standard.set(playMode.rawValue, forKey: PlayMode.storageKey) }
     }
-    @Published var volume: Double = 0.72 {
-        didSet { player?.volume = Float(volume) }
+    /// Volume has its own key (not the session snapshot) so it survives switching
+    /// tracks. 100% is the default: the reference player ships at unity gain.
+    static let volumeKey = "player.volume"
+    /// One-shot: sessions saved before the default changed stored 0.72, and those
+    /// would otherwise stick forever.
+    static let volumeMigrationKey = "player.volume.migrated"
+
+    @Published var volume: Double = 1.0 {
+        didSet {
+            let clamped = min(max(volume, 0), 1)
+            if clamped != volume { volume = clamped; return }
+            player?.volume = Float(volume)
+            UserDefaults.standard.set(volume, forKey: Self.volumeKey)
+        }
     }
     /// High-frequency state lives in separate objects so that observing the engine
     /// does not redraw the whole window on every tick.
+    override init() {
+        super.init()
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: Self.volumeMigrationKey) {
+            volume = min(max(defaults.double(forKey: Self.volumeKey), 0), 1)
+        } else {
+            volume = 1.0
+            defaults.set(true, forKey: Self.volumeMigrationKey)
+        }
+    }
+
     let cursor = PlaybackCursor()
     let clock = ProgressClock()
     let bands = SpectrumBands()
@@ -205,7 +228,6 @@ final class PlayerEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
         syncCursor()
         duration = track.duration
         isPlaying = false
-        volume = snapshot.volume
         if let mode = PlayMode(rawValue: snapshot.playMode) { playMode = mode }
 
         if let url = track.url {
