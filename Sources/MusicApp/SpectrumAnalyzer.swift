@@ -21,6 +21,14 @@ final class SpectrumAnalyzer {
     private var log2n: vDSP_Length = 11
     private var window: [Float] = []
     private var magnitudes: [Float] = []
+    // Scratch for the FFT: allocated once in `makeSetup`. A 20 Hz meter used to
+    // allocate a PCM buffer plus four arrays per tick; nothing here grows.
+    private var readBuffer: AVAudioPCMBuffer?
+    private var samples = [Float](repeating: 0, count: SpectrumAnalyzer.fftSize)
+    private var windowed = [Float](repeating: 0, count: SpectrumAnalyzer.fftSize)
+    private var realPart = [Float](repeating: 0, count: SpectrumAnalyzer.fftSize / 2)
+    private var imagPart = [Float](repeating: 0, count: SpectrumAnalyzer.fftSize / 2)
+    private var bandTargetsScratch = [CGFloat](repeating: 0, count: SpectrumAnalyzer.bandCount)
     private var smoothed = [CGFloat](repeating: 0, count: SpectrumAnalyzer.bandCount)
     private var bandRanges: [(lower: Int, upper: Int)] = []
 
@@ -67,10 +75,7 @@ final class SpectrumAnalyzer {
 
     /// Must run on `queue` (it mutates the smoothing state).
     private func sampleBands(at time: Double) -> [CGFloat] {
-        guard let file, let format else { return Array(repeating: 0, count: Self.bandCount) }
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(Self.fftSize)) else {
-            return Array(repeating: 0, count: Self.bandCount)
-        }
+        guard let file, let buffer = readBuffer else { return Array(repeating: 0, count: Self.bandCount) }
         do {
             file.framePosition = AVAudioFramePosition(max(0, time) * file.processingFormat.sampleRate)
             try file.read(into: buffer, frameCount: AVAudioFrameCount(Self.fftSize))
@@ -81,12 +86,17 @@ final class SpectrumAnalyzer {
             return Array(repeating: 0, count: Self.bandCount)
         }
 
-        var samples = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
-        if samples.count < Self.fftSize {
-            samples.append(contentsOf: repeatElement(0, count: Self.fftSize - samples.count))
+        // Copy into the scratch array: a short final frame is zero padded.
+        let frames = Int(buffer.frameLength)
+        samples.withUnsafeMutableBufferPointer { destination in
+            destination.baseAddress!.update(from: channel, count: min(frames, Self.fftSize))
+            if frames < Self.fftSize {
+                destination.baseAddress!.advanced(by: frames)
+                    .update(repeating: 0, count: Self.fftSize - frames)
+            }
         }
 
-        let targets = bandTargets(from: samples)
+        let targets = bandTargets()
         for index in 0..<Self.bandCount {
             let target = targets[index]
             // Fast attack, slow release — the way a hardware meter behaves.
@@ -96,19 +106,14 @@ final class SpectrumAnalyzer {
         return smoothed
     }
 
-    private func bandTargets(from samples: [Float]) -> [CGFloat] {
+    private func bandTargets() -> [CGFloat] {
         guard let setup, window.count == Self.fftSize, !bandRanges.isEmpty else {
             return Array(repeating: 0, count: Self.bandCount)
         }
         let n = Self.fftSize
         let half = n / 2
 
-        var windowed = [Float](repeating: 0, count: n)
         vDSP_vmul(samples, 1, window, 1, &windowed, 1, vDSP_Length(n))
-
-        var realPart = [Float](repeating: 0, count: half)
-        var imagPart = [Float](repeating: 0, count: half)
-        var magnitudes = [Float](repeating: 0, count: half)
 
         realPart.withUnsafeMutableBufferPointer { realBuffer in
             imagPart.withUnsafeMutableBufferPointer { imagBuffer in
@@ -127,7 +132,6 @@ final class SpectrumAnalyzer {
         var scale = Float(1) / Float(n)
         vDSP_vsmul(magnitudes, 1, &scale, &magnitudes, 1, vDSP_Length(half))
 
-        var result = [CGFloat](repeating: 0, count: Self.bandCount)
         for (index, range) in bandRanges.enumerated() {
             var peak: Float = 0
             for bin in range.lower...range.upper {
@@ -140,9 +144,9 @@ final class SpectrumAnalyzer {
             // -72 dB reads empty, -20 dB reads full. Measured on real tracks:
             // median band ≈ -52 dB, loudest ≈ -25 dB.
             let normalised = (decibels + tilt + 72) / 52
-            result[index] = CGFloat(min(1, max(0, normalised)))
+            bandTargetsScratch[index] = CGFloat(min(1, max(0, normalised)))
         }
-        return result
+        return bandTargetsScratch
     }
 
     // MARK: - Setup
@@ -152,9 +156,18 @@ final class SpectrumAnalyzer {
         log2n = vDSP_Length(log2(Float(n)).rounded())
         setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
 
+        magnitudes = [Float](repeating: 0, count: n / 2)
         var hann = [Float](repeating: 0, count: n)
         vDSP_hann_window(&hann, vDSP_Length(n), Int32(vDSP_HANN_NORM))
         window = hann
+
+        // One PCM buffer for every read: `sampleBands` runs 20 times a second and
+        // used to build a fresh buffer each time. The test hook has no file, so
+        // there is nothing to allocate there.
+        if let format {
+            readBuffer = AVAudioPCMBuffer(pcmFormat: format,
+                                          frameCapacity: AVAudioFrameCount(n))
+        }
 
         // Logarithmic bands from 40 Hz to just under Nyquist.
         let lower = 40.0
@@ -179,7 +192,15 @@ final class SpectrumAnalyzer {
         let analyzer = SpectrumAnalyzer()
         analyzer.sampleRate = sampleRate
         analyzer.makeSetup()
-        return analyzer.bandTargets(from: samples)
+        analyzer.samples.withUnsafeMutableBufferPointer { destination in
+            let count = min(samples.count, SpectrumAnalyzer.fftSize)
+            destination.baseAddress!.update(from: samples, count: count)
+            if count < SpectrumAnalyzer.fftSize {
+                destination.baseAddress!.advanced(by: count)
+                    .update(repeating: 0, count: SpectrumAnalyzer.fftSize - count)
+            }
+        }
+        return analyzer.bandTargets()
     }
 
     /// Centre frequency of a band, for the self test's assertions.

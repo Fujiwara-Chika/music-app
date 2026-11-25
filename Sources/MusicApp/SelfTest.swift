@@ -115,6 +115,7 @@ enum SelfTest {
         let okRestore = checkPlaybackMemory()
         let okDerived = checkDerivedCache(store)
         let okRescan = checkRescanKeepsStats()
+        let okIncremental = checkIncrementalScan()
         let okPlaylists = checkPlaylists(store)
         let okEmptyScan = checkEmptyScanPersists()
         let okOrdering = checkSnapshotOrdering()
@@ -124,9 +125,10 @@ enum SelfTest {
         let okPlaylistRoundTrip = checkPlaylistRoundTrip(store)
         let ok = okPlayback && okPause && okOrder && okSort && okCache && okGroups
             && okModes && okPalette && okRestore && okSpectrum && okDerived && okRescan
+            && okIncremental
             && okPlaylists && okRowIDs && okPaletteAsync && okPlaylistRoundTrip && okEmptyScan
             && okOrdering
-        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering))")
+        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental))")
         exit(ok ? 0 : 1)
     }
 
@@ -206,6 +208,56 @@ enum SelfTest {
         }
         do { try file.write(from: buffer) } catch { return nil }
         return url
+    }
+
+    /// A rescan must not re-read tags for files that did not change: that is the
+    /// difference between 13-17s and 0.3s on a 5,800-track library. Touching one
+    /// file's mtime must cost exactly one re-parse.
+    private static func checkIncrementalScan() -> Bool {
+        let fm = FileManager.default
+        let folder = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("music-selftest-incremental-\(UUID().uuidString)", isDirectory: true)
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: folder) }
+
+        var made = 0
+        for index in 1...3 where makeTestAudio(in: folder, name: "gap-\(index).wav") != nil {
+            made += 1
+        }
+        guard made == 3 else {
+            print("selftest: incremental — FAIL could not write test audio")
+            return false
+        }
+
+        let store = makeStore()
+        var done = false
+        Task { @MainActor in await store.scan(folder: folder); done = true }
+        wait(until: { done }, timeout: 30)
+        let firstRun = store.metadataReads
+        let counted = store.tracks.count
+
+        done = false
+        Task { @MainActor in await store.scan(folder: folder); done = true }
+        wait(until: { done }, timeout: 30)
+        let secondRun = store.metadataReads
+        let stillCounted = store.tracks.count
+
+        // Touch exactly one file, so exactly one tag read is expected.
+        let touched = folder.appendingPathComponent("gap-2.wav")
+        let future = Date().addingTimeInterval(3600)
+        try? fm.setAttributes([.modificationDate: future], ofItemAtPath: touched.path)
+
+        done = false
+        Task { @MainActor in await store.scan(folder: folder); done = true }
+        wait(until: { done }, timeout: 30)
+        let thirdRun = store.metadataReads
+
+        let parsedOnce = firstRun == 3
+        let reusedAll = secondRun == 0 && stillCounted == counted
+        let onlyTouched = thirdRun == 1 && store.tracks.count == counted
+        print("selftest: incremental — parsed=\(firstRun) reused=\(counted - firstRun), "
+              + "second=\(secondRun), after-touch=\(thirdRun), tracks=\(store.tracks.count)")
+        return parsedOnce && reusedAll && onlyTouched
     }
 
     private static func checkRescanKeepsStats() -> Bool {

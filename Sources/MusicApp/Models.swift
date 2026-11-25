@@ -16,6 +16,12 @@ struct Track: Identifiable, Hashable, Codable {
     var duration: TimeInterval = 0
     /// nil for the bundled demo library (no audio on disk).
     var url: URL? = nil
+    /// Fingerprint of the file the tags were read from. A rescan compares these
+    /// against the disk and reuses the parsed tags when nothing changed — reading
+    /// 5,800 files' metadata is the slow part of a scan (13-17s), and most of it
+    /// is spent on files that did not move.
+    var fileMtime: Date? = nil
+    var fileSize: Int64? = nil
 
     // Technical description, shown as "AAC | LC | 258K | 1次"
     var codec: String = "AAC"

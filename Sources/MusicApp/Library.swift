@@ -40,6 +40,9 @@ final class LibraryStore: ObservableObject {
     @Published var sourceName: String = "示例资料库"
     @Published var isDemoLibrary: Bool = true
     @Published var isScanning: Bool = false
+    /// How many files the last scan had to open and parse. The rest were reused
+    /// from the snapshot because their mtime + size had not changed.
+    private(set) var metadataReads = 0
 
     // UI state
     @Published var filterText: String = ""
@@ -807,6 +810,125 @@ final class LibraryStore: ObservableObject {
     /// Files are published in batches while the scan runs: a 4000-track folder
     /// takes a few seconds, and staring at an empty table for that long feels
     /// broken. Rows appear progressively and the source name updates immediately.
+    /// One audio file as the enumerator reported it: the URL plus the cheap
+    /// fingerprint used to decide whether its tags have to be read again.
+    struct AudioFile: Sendable {
+        let url: URL
+        let mtime: Date?
+        let size: Int64?
+
+        func isUnchanged(since track: Track) -> Bool {
+            track.fileMtime == mtime && track.fileSize == size && track.duration > 0
+        }
+    }
+
+    /// What a worker hands back to the main actor. `Data` rather than `NSImage`
+    /// keeps the boundary a value type.
+    struct ParsedFile: Sendable {
+        let index: Int
+        let track: Track
+        let artwork: Data?
+    }
+
+    /// Reads one file's tags off the main actor. Everything here is either a
+    /// value type or AVFoundation's own async API.
+    nonisolated static func parse(_ file: AudioFile,
+                                  index: Int,
+                                  folderArtist: String,
+                                  previous: Track?,
+                                  knownID: UUID?) async -> ParsedFile {
+        var t = Track(title: file.url.deletingPathExtension().lastPathComponent,
+                      artist: folderArtist,
+                      albumArtist: folderArtist,
+                      album: file.url.deletingLastPathComponent().lastPathComponent,
+                      url: file.url)
+
+        // Filename heuristics: "01 Title" / "01 02 - Title"
+        let base = file.url.deletingPathExtension().lastPathComponent
+        if let m = filenamePattern.firstMatch(in: base, range: NSRange(base.startIndex..., in: base)),
+           let titleRange = Range(m.range(at: m.numberOfRanges - 1), in: base) {
+            if let numberRange = Range(m.range(at: 1), in: base) {
+                t.trackNumber = Int(base[numberRange]) ?? 0
+            }
+            t.title = String(base[titleRange]).trimmingCharacters(in: .whitespaces)
+        }
+
+        let asset = AVURLAsset(url: file.url)
+        var artworkData: Data?
+
+        if let meta = try? await asset.load(.commonMetadata) {
+            for item in meta {
+                guard let key = item.commonKey else { continue }
+                switch key {
+                case .commonKeyTitle:
+                    if let s = try? await item.load(.stringValue), !s.isEmpty { t.title = s }
+                case .commonKeyArtist:
+                    if let s = try? await item.load(.stringValue), !s.isEmpty { t.artist = s }
+                case .commonKeyAlbumName:
+                    if let s = try? await item.load(.stringValue), !s.isEmpty { t.album = s }
+                case .commonKeyArtwork:
+                    if let data = try? await item.load(.dataValue) { artworkData = data }
+                default: break
+                }
+            }
+        }
+
+        // The iTunes atoms AVFoundation maps without a common key: album artist,
+        // release date, genre, disc and track numbers. Without these, imported
+        // albums lose their grouping (album artist) and the 流派 / year columns.
+        if let trackItems = try? await asset.load(.metadata) {
+            for item in trackItems {
+                guard let id = item.identifier?.rawValue.lowercased() else { continue }
+                if id.contains("aart") {
+                    if let s = try? await item.load(.stringValue), !s.isEmpty { t.albumArtist = s }
+                } else if id.contains("%a9day") || id.contains("tdrc") || id.contains("year") {
+                    if let s = try? await item.load(.stringValue), let y = Int(s.prefix(4)) { t.year = y }
+                } else if id.contains("%a9gen") || id.contains("gnre") {
+                    if let s = try? await item.load(.stringValue), !s.isEmpty { t.genre = s }
+                } else if id.contains("trkn") || id.contains("trck") {
+                    if let s = try? await item.load(.stringValue) {
+                        let leading = s.split(separator: "/").first.map(String.init) ?? s
+                        if let n = Int(leading.trimmingCharacters(in: .whitespaces)) { t.trackNumber = n }
+                    }
+                } else if id.contains("disk") || id.contains("tpos") {
+                    if let s = try? await item.load(.stringValue) {
+                        let leading = s.split(separator: "/").first.map(String.init) ?? s
+                        if let n = Int(leading.trimmingCharacters(in: .whitespaces)) { t.discNumber = n }
+                    }
+                } else if id.contains("covr"), artworkData == nil {
+                    if let data = try? await item.load(.dataValue) { artworkData = data }
+                }
+            }
+        }
+        if t.albumArtist.isEmpty { t.albumArtist = t.artist }
+
+        if let d = try? await asset.load(.duration).seconds, d.isFinite, d > 0 {
+            t.duration = d
+            if let size = file.size, size > 0 {
+                t.bitrate = max(1, Int(Double(size) * 8 / d / 1000))
+            }
+        }
+
+        // Stats and identity always come from the previous library, whether or
+        // not its tags were reused.
+        if let previous {
+            t.id = previous.id
+            t.playCount = previous.playCount
+            t.rating = previous.rating
+            t.lastPlayed = previous.lastPlayed
+        } else if let knownID {
+            t.id = knownID
+        }
+        t.fileMtime = file.mtime
+        t.fileSize = file.size
+
+        let ext = file.url.pathExtension.lowercased()
+        t.codec = (ext == "m4a" || ext == "aac") ? "AAC" : ext.uppercased()
+        t.profile = (ext == "flac" || ext == "wav" || ext == "aiff") ? "PCM" : "LC"
+
+        return ParsedFile(index: index, track: t, artwork: artworkData)
+    }
+
     func scan(folder: URL) async {
         NSLog("音乐: scanning %@", folder.path)
         // A new scan supersedes whatever is running: bump the generation so the
@@ -840,17 +962,21 @@ final class LibraryStore: ObservableObject {
         isDemoLibrary = false
 
         let fm = FileManager.default
-        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
+        // `contentModificationDate` + `fileSize` come for free from the enumerator
+        // and are the fingerprint an incremental rescan needs.
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
         let audioExts: Set<String> = ["mp3", "m4a", "aac", "alac", "flac", "wav", "aiff", "aif", "ogg", "opus", "mp4"]
 
-        var found: [URL] = []
+        var found: [AudioFile] = []
         if let en = fm.enumerator(at: folder,
                                   includingPropertiesForKeys: keys,
                                   options: [.skipsHiddenFiles, .skipsPackageDescendants]) {
             for case let fileURL as URL in en {
-                if audioExts.contains(fileURL.pathExtension.lowercased()) {
-                    found.append(fileURL)
-                }
+                guard audioExts.contains(fileURL.pathExtension.lowercased()) else { continue }
+                let values = try? fileURL.resourceValues(forKeys: Set(keys))
+                found.append(AudioFile(url: fileURL,
+                                       mtime: values?.contentModificationDate,
+                                       size: values?.fileSize.map(Int64.init)))
             }
         }
 
@@ -865,113 +991,77 @@ final class LibraryStore: ObservableObject {
         // Ids survive even when the previous scan did not see the file at all.
         let knownIDs = trackIDsByPath
 
-        var scanned: [Track] = []
-        var art: [String: NSImage] = [:]
+        let started = Date()
         let folderArtist = Self.artistHint(fromFolderName: folder.lastPathComponent)
         let batch = 250
 
-        for url in found.prefix(20_000) {
-            var t = Track(title: url.deletingPathExtension().lastPathComponent,
-                          artist: folderArtist,
-                          albumArtist: folderArtist,
-                          album: url.deletingLastPathComponent().lastPathComponent,
-                          url: url)
-
-            // Filename heuristics: "01 Title" / "01 02 - Title"
-            let base = url.deletingPathExtension().lastPathComponent
-            if let m = Self.filenamePattern.firstMatch(in: base, range: NSRange(base.startIndex..., in: base)),
-               let titleRange = Range(m.range(at: m.numberOfRanges - 1), in: base) {
-                if let numberRange = Range(m.range(at: 1), in: base) {
-                    t.trackNumber = Int(base[numberRange]) ?? 0
-                }
-                t.title = String(base[titleRange]).trimmingCharacters(in: .whitespaces)
+        // One slot per file keeps the order stable while the tags are read
+        // concurrently; a slot is filled either by reusing the previous parse or
+        // by a worker, and the table shows whatever is already filled.
+        var slots = [Track?](repeating: nil, count: found.count)
+        var pending: [AudioFile] = []
+        var reused = 0
+        for (index, file) in found.enumerated() {
+            guard let previous = previousByPath[file.url.path],
+                  file.isUnchanged(since: previous) else {
+                pending.append(file)
+                continue
             }
+            // Nothing moved: the parsed tags, the play count and the id all come
+            // straight from the previous library, no file is opened.
+            slots[index] = previous
+            reused += 1
+            if reused % batch == 0 { tracks = slots.compactMap { $0 } }
+        }
+        if reused > 0 { tracks = slots.compactMap { $0 } }
 
-            let asset = AVURLAsset(url: url)
-            var embeddedArt: NSImage?
+        var art: [String: NSImage] = [:]
+        var parsed = 0
+        metadataReads = 0
 
-            if let meta = try? await asset.load(.commonMetadata) {
-                for item in meta {
-                    guard let key = item.commonKey else { continue }
-                    switch key {
-                    case .commonKeyTitle:
-                        if let s = try? await item.load(.stringValue), !s.isEmpty { t.title = s }
-                    case .commonKeyArtist:
-                        if let s = try? await item.load(.stringValue), !s.isEmpty { t.artist = s }
-                    case .commonKeyAlbumName:
-                        if let s = try? await item.load(.stringValue), !s.isEmpty { t.album = s }
-                    case .commonKeyArtwork:
-                        if let data = try? await item.load(.dataValue), let img = NSImage(data: data) {
-                            embeddedArt = img
-                        }
-                    default: break
-                    }
-                }
-            }
-
-            // The iTunes atoms AVFoundation maps without a common key: album artist,
-            // release date, genre, disc and track numbers. Without these, imported
-            // albums lose their grouping (album artist) and the 流派 / year columns.
-            if let trackItems = try? await asset.load(.metadata) {
-                for item in trackItems {
-                    guard let id = item.identifier?.rawValue.lowercased() else { continue }
-                    if id.contains("aart") {
-                        if let s = try? await item.load(.stringValue), !s.isEmpty { t.albumArtist = s }
-                    } else if id.contains("%a9day") || id.contains("tdrc") || id.contains("year") {
-                        if let s = try? await item.load(.stringValue), let y = Int(s.prefix(4)) { t.year = y }
-                    } else if id.contains("%a9gen") || id.contains("gnre") {
-                        if let s = try? await item.load(.stringValue), !s.isEmpty { t.genre = s }
-                    } else if id.contains("trkn") || id.contains("trck") {
-                        if let s = try? await item.load(.stringValue) {
-                            let leading = s.split(separator: "/").first.map(String.init) ?? s
-                            if let n = Int(leading.trimmingCharacters(in: .whitespaces)) { t.trackNumber = n }
-                        }
-                    } else if id.contains("disk") || id.contains("tpos") {
-                        if let s = try? await item.load(.stringValue) {
-                            let leading = s.split(separator: "/").first.map(String.init) ?? s
-                            if let n = Int(leading.trimmingCharacters(in: .whitespaces)) { t.discNumber = n }
-                        }
-                    } else if id.contains("covr"), embeddedArt == nil {
-                        if let data = try? await item.load(.dataValue), let img = NSImage(data: data) {
-                            embeddedArt = img
-                        }
-                    }
+        await withTaskGroup(of: ParsedFile.self) { group in
+            var next = 0
+            let width = 8
+            func addNext() {
+                guard next < pending.count else { return }
+                let file = pending[next]
+                let index = next
+                next += 1
+                let previous = previousByPath[file.url.path]
+                group.addTask {
+                    await Self.parse(file, index: index,
+                                     folderArtist: folderArtist,
+                                     previous: previous,
+                                     knownID: knownIDs[file.url.path])
                 }
             }
-            if t.albumArtist.isEmpty { t.albumArtist = t.artist }
+            for _ in 0..<min(width, pending.count) { addNext() }
 
-            if let d = try? await asset.load(.duration).seconds, d.isFinite, d > 0 {
-                t.duration = d
-                if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0 {
-                    t.bitrate = max(1, Int(Double(size) * 8 / d / 1000))
+            for await result in group {
+                guard generation == scanGeneration, !Task.isCancelled else {
+                    group.cancelAll()
+                    return
                 }
-            }
-
-            if let previous = previousByPath[url.path] {
-                t.id = previous.id
-                t.playCount = previous.playCount
-                t.rating = previous.rating
-                t.lastPlayed = previous.lastPlayed
-            } else if let known = knownIDs[url.path] {
-                t.id = known
-            }
-
-            let ext = url.pathExtension.lowercased()
-            t.codec = (ext == "m4a" || ext == "aac") ? "AAC" : ext.uppercased()
-            t.profile = (ext == "flac" || ext == "wav" || ext == "aiff") ? "PCM" : "LC"
-
-            scanned.append(t)
-            // Key the artwork by the *final* album key, which needs albumArtist.
-            if let embeddedArt {
-                art[t.albumKey] = embeddedArt
-            }
-
-            if scanned.count % batch == 0 {
-                guard generation == scanGeneration, !Task.isCancelled else { return }
-                tracks = scanned
-                await Task.yield()
+                slots[result.index] = result.track
+                if let data = result.artwork, let image = NSImage(data: data) {
+                    art[result.track.albumKey] = image
+                }
+                parsed += 1
+                metadataReads += 1
+                addNext()
+                if parsed % batch == 0 {
+                    tracks = slots.compactMap { $0 }
+                    await Task.yield()
+                }
             }
         }
+        guard generation == scanGeneration, !Task.isCancelled else { return }
+
+        let ordered = slots.compactMap { $0 }
+        NSLog("音乐: scan finished in %.1fs — %d files, %d parsed, %d reused",
+              Date().timeIntervalSince(started), ordered.count, parsed, reused)
+
+        let scanned: [Track] = ordered
 
         guard generation == scanGeneration, !Task.isCancelled else { return }
         guard !scanned.isEmpty else {
@@ -1028,7 +1118,7 @@ final class LibraryStore: ObservableObject {
         cache.write(snapshot, artworks: art)
     }
 
-    private static let filenamePattern = try! NSRegularExpression(
+    nonisolated private static let filenamePattern = try! NSRegularExpression(
         pattern: #"^(\d{1,3})[\s\.\-]+(?:(\d{1,3})[\s\.\-]+)?(?:-\s*)?(.+)$"#
     )
 
