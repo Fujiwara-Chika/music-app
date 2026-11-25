@@ -30,15 +30,21 @@ if let dragIndex = args.firstIndex(of: "--drag"), args.count > dragIndex + 1 {
     }
     usleep(150_000)
     post(.leftMouseDown, clicks: 1)
-    let steps = 12
+    let slow = args.contains("--slow")
+    let steps = slow ? 40 : 12
     for i in 1...steps {
         let p = CGPoint(x: point.x + parts[0] * Double(i) / Double(steps),
                         y: point.y + parts[1] * Double(i) / Double(steps))
         if let move = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged,
                               mouseCursorPosition: p, mouseButton: .left) {
+            // SwiftUI gestures read the per-event delta, not just the position.
+            move.setIntegerValueField(.mouseEventDeltaX,
+                                      value: Int64((parts[0] / Double(steps)).rounded()))
+            move.setIntegerValueField(.mouseEventDeltaY,
+                                      value: Int64((parts[1] / Double(steps)).rounded()))
             move.post(tap: .cghidEventTap)
         }
-        usleep(12_000)
+        usleep(slow ? 60_000 : 12_000)
     }
     post(.leftMouseUp, clicks: 1)
     print("dragged \(parts[0]),\(parts[1])")

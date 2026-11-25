@@ -23,23 +23,59 @@ struct SongTableColumns {
     private static let baseArtist: CGFloat = 93
     private static let baseAlbumArtist: CGFloat = 98
 
-    static func resolved(for width: CGFloat) -> SongTableColumns {
+    /// Width keys, also used as the persistence keys for the user's own widths.
+    static let keyTitle = "title"
+    static let keyAlbum = "album"
+    static let keyArtist = "artist"
+    static let keyAlbumArtist = "albumArtist"
+    static let keyGenre = "genre"
+
+    /// The narrowest each column may get while still showing something.
+    static let minimums: [String: Double] = [
+        keyTitle: 120, keyAlbum: 88, keyArtist: 70, keyAlbumArtist: 78, keyGenre: 70
+    ]
+
+    /// `overrides` carries the widths the user dragged. Columns without an
+    /// override keep the proportional layout; genre always takes the remainder so
+    /// the row still fills the table exactly.
+    static func resolved(for width: CGFloat, overrides: [String: Double] = [:]) -> SongTableColumns {
         let check = Metrics.colCheck
         let status = Metrics.colStatus
         let available = max(0, width - check - status)
 
-        let baseSum = baseTitle + baseAlbum + baseArtist + baseAlbumArtist
-        let minGenre = Metrics.colGenreMin
-        let scale: CGFloat = available >= baseSum + minGenre
-            ? 1
-            : max(0, (available - minGenre) / baseSum)
+        func wanted(_ key: String, _ base: CGFloat) -> CGFloat {
+            guard let stored = overrides[key] else { return base }
+            return max(CGFloat(minimums[key] ?? 0), CGFloat(stored))
+        }
 
-        let title = baseTitle * scale
-        let album = baseAlbum * scale
-        let artist = baseArtist * scale
-        let albumArtist = baseAlbumArtist * scale
-        let genre = max(0, available - title - album - artist - albumArtist)
+        var title = wanted(keyTitle, baseTitle)
+        var album = wanted(keyAlbum, baseAlbum)
+        var artist = wanted(keyArtist, baseArtist)
+        var albumArtist = wanted(keyAlbumArtist, baseAlbumArtist)
+        let minGenre = CGFloat(minimums[keyGenre] ?? Metrics.colGenreMin)
 
+        let flexible = title + album + artist + albumArtist
+        if overrides.isEmpty {
+            // Untouched table: scale the reference widths to the window.
+            let scale: CGFloat = available >= flexible + minGenre
+                ? 1
+                : max(0, (available - minGenre) / flexible)
+            title *= scale
+            album *= scale
+            artist *= scale
+            albumArtist *= scale
+        } else if available - flexible < minGenre {
+            // The dragged widths no longer fit: shrink the flexible ones
+            // proportionally, never below their minimums.
+            let room = max(0, available - minGenre)
+            let scale = flexible > 0 ? min(1, room / flexible) : 0
+            title = max(CGFloat(minimums[keyTitle] ?? 0), title * scale)
+            album = max(CGFloat(minimums[keyAlbum] ?? 0), album * scale)
+            artist = max(CGFloat(minimums[keyArtist] ?? 0), artist * scale)
+            albumArtist = max(CGFloat(minimums[keyAlbumArtist] ?? 0), albumArtist * scale)
+        }
+
+        let genre = max(minGenre, available - title - album - artist - albumArtist)
         return SongTableColumns(
             check: check,
             status: status,
@@ -50,6 +86,9 @@ struct SongTableColumns {
             genre: genre
         )
     }
+
+    /// Total width of the flexible columns, for the resize cursor maths.
+    var flexibleTotal: CGFloat { title + album + artist + albumArtist + genre }
 }
 
 // MARK: - Table
@@ -65,6 +104,7 @@ struct SongTableActions {
 
 struct SongTable: View {
 @Environment(\.palette) private var palette
+    @EnvironmentObject private var appearance: AppearanceSettings
     let actions: SongTableActions
     let cursor: PlaybackCursor
     let clock: ProgressClock
@@ -94,7 +134,8 @@ struct SongTable: View {
         let rows = store.rows
 
         GeometryReader { proxy in
-            let columns = SongTableColumns.resolved(for: proxy.size.width)
+            let columns = SongTableColumns.resolved(for: proxy.size.width,
+                                                   overrides: appearance.columnWidths)
 
             VStack(spacing: 0) {
                 SongTableHeader(columns: columns)
@@ -172,6 +213,7 @@ private struct SongTableHeader: View {
     let columns: SongTableColumns
 
     @EnvironmentObject private var store: LibraryStore
+    @EnvironmentObject private var appearance: AppearanceSettings
 
     /// See `SongTableAppKit.renderToken`. Kept here so both containers agree on
     /// what counts as "the rows changed".
@@ -189,15 +231,48 @@ private struct SongTableHeader: View {
                 .frame(width: columns.check)
 
             headerCell("状态", width: columns.status, column: nil)
-            TitleHeaderCell(columns: columns)
-            headerCell("专辑", width: columns.album, column: .album)
-            headerCell("艺术家", width: columns.artist, column: .artist)
-            headerCell("专辑艺术家", width: columns.albumArtist, column: .albumArtist)
-            genreCell
+            columnResizer(SongTableColumns.keyTitle) {
+                TitleHeaderCell(columns: columns)
+            }
+            columnResizer(SongTableColumns.keyAlbum) {
+                headerCell("专辑", width: columns.album, column: .album)
+            }
+            columnResizer(SongTableColumns.keyArtist) {
+                headerCell("艺术家", width: columns.artist, column: .artist)
+            }
+            columnResizer(SongTableColumns.keyAlbumArtist) {
+                headerCell("专辑艺术家", width: columns.albumArtist, column: .albumArtist)
+            }
+            columnResizer(SongTableColumns.keyGenre) {
+                genreCell
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(palette.columnHeader)
         .overlay(alignment: .bottom) { Hairline() }
+    }
+
+    /// A column plus the 5pt grip on its trailing edge. Dragging the grip sets
+    /// that column's width; genre keeps taking the remainder, so the row never
+    /// leaves a gap on the right.
+    private func columnResizer<Content: View>(_ key: String,
+                                              @ViewBuilder content: () -> Content) -> some View {
+        content()
+            .overlay(alignment: .trailing) {
+                ColumnResizer(key: key, current: width(for: key))
+                    .offset(x: 3)
+            }
+    }
+
+    private func width(for key: String) -> Double {
+        if let stored = appearance.columnWidths[key] { return stored }
+        switch key {
+        case SongTableColumns.keyTitle: return Double(columns.title)
+        case SongTableColumns.keyAlbum: return Double(columns.album)
+        case SongTableColumns.keyArtist: return Double(columns.artist)
+        case SongTableColumns.keyAlbumArtist: return Double(columns.albumArtist)
+        default: return Double(columns.genre)
+        }
     }
 
     private func headerCell(_ title: String, width: CGFloat, column: SortColumn?) -> some View {
@@ -662,6 +737,43 @@ private struct SongTableEmptyState: View {
 
 
 // MARK: - Row factory
+
+/// The 5pt-wide grip between two column headers.
+struct ColumnResizer: View {
+    let key: String
+    let current: Double
+
+    @EnvironmentObject private var appearance: AppearanceSettings
+    @State private var start: Double?
+    @State private var hovering = false
+
+    var body: some View {
+        Rectangle()
+            .fill(Theme.textSecondary.opacity(hovering ? 0.45 : 0))
+            .frame(width: hovering ? 2 : 1)
+            .frame(width: 9)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                hovering = inside
+                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let base = start ?? current
+                        if start == nil { start = base }
+                        appearance.setColumnWidth(base + value.translation.width, for: key)
+                        NSCursor.resizeLeftRight.push()
+                    }
+                    .onEnded { _ in
+                        start = nil
+                        NSCursor.pop()
+                    }
+            )
+            .help("拖动调整这一栏的宽度")
+    }
+}
 
 /// Draws one `TableRow`. Shared by every container so the AppKit table and the
 /// SwiftUI list cannot drift apart.

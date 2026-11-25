@@ -118,6 +118,7 @@ enum SelfTest {
         let okDiscLabels = checkDiscLabels()
         let okRescan = checkRescanKeepsStats()
         let okIncremental = checkIncrementalScan()
+        let okColumns = checkColumnLayout()
         let okUpgrade = checkSnapshotUpgrade(store)
         let okUpgradeScan = checkSnapshotUpgradeEndToEnd()
         let okPlaylists = checkPlaylists(store)
@@ -132,7 +133,7 @@ enum SelfTest {
             && okIncremental && okUpgrade && okUpgradeScan
             && okPlaylists && okRowIDs && okPaletteAsync && okPlaylistRoundTrip && okEmptyScan
             && okOrdering
-        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), reveal=\(okReveal), disclabels=\(okDiscLabels))")
+        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), columns=\(okColumns), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), reveal=\(okReveal), disclabels=\(okDiscLabels))")
         exit(ok ? 0 : 1)
     }
 
@@ -370,6 +371,32 @@ enum SelfTest {
     /// The real upgrade path: a v1 snapshot on disk, a fresh `LibraryStore` that
     /// adopts it and then rescans because it is stale. Only this exercises
     /// `init → apply → scan`, which is where the statistics used to be lost.
+    /// Column widths: defaults scale down, dragged widths win, and nothing ever
+    /// goes below its minimum or past the table's right edge.
+    private static func checkColumnLayout() -> Bool {
+        let narrow = SongTableColumns.resolved(for: 700)
+        let sum = narrow.title + narrow.album + narrow.artist + narrow.albumArtist + narrow.genre
+        let fits = abs(sum - (700 - narrow.check - narrow.status)) < 0.5
+
+        let dragged = SongTableColumns.resolved(for: 900, overrides: [
+            SongTableColumns.keyTitle: 260, SongTableColumns.keyArtist: 20
+        ])
+        let artistMin = CGFloat(SongTableColumns.minimums[SongTableColumns.keyArtist] ?? 0)
+        let respected = abs(dragged.title - 260) < 0.5 && abs(dragged.artist - artistMin) < 0.5
+        let draggedSum = dragged.title + dragged.album + dragged.artist + dragged.albumArtist + dragged.genre
+        let draggedFits = abs(draggedSum - (900 - dragged.check - dragged.status)) < 0.5
+
+        let squeezed = SongTableColumns.resolved(for: 620, overrides: [
+            SongTableColumns.keyTitle: 400, SongTableColumns.keyAlbum: 300
+        ])
+        let genreMin = CGFloat(SongTableColumns.minimums[SongTableColumns.keyGenre] ?? 0)
+        let titleMin = CGFloat(SongTableColumns.minimums[SongTableColumns.keyTitle] ?? 0)
+        let squeezedOk = squeezed.genre >= genreMin && squeezed.title >= titleMin
+
+        print("selftest: column layout — fits=\(fits), override=\(respected), sum=\(draggedFits), squeeze=\(squeezedOk)")
+        return fits && respected && draggedFits && squeezedOk
+    }
+
     private static func checkSnapshotUpgradeEndToEnd() -> Bool {
         let fm = FileManager.default
         let root = URL(fileURLWithPath: NSTemporaryDirectory())

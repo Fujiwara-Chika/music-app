@@ -138,8 +138,17 @@ struct RootView: View {
                     SidebarView()
                         .frame(maxHeight: .infinity)
                 }
-                .frame(width: Metrics.sidebarWidth)
+                .frame(width: appearance.sidebarWidth)
+            .onChange(of: appearance.sidebarWidth) { _, new in NSLog("音乐: root saw sidebar \(new)") }
                 .background(shown.windowBG)
+
+                PaneResizer(
+                    edge: .trailing,
+                    width: Binding(get: { appearance.sidebarWidth },
+                                   set: { appearance.sidebarWidth = $0 }),
+                    range: AppearanceSettings.sidebarWidthRange,
+                    color: Theme.separator
+                )
 
                 SongTable(actions: SongTableActions(
                     play: { player.play($0, in: $1) },
@@ -148,8 +157,16 @@ struct RootView: View {
                 ), cursor: player.cursor, clock: player.clock)
                     .frame(maxWidth: .infinity)
 
+                PaneResizer(
+                    edge: .leading,
+                    width: Binding(get: { appearance.panelWidth },
+                                   set: { appearance.panelWidth = $0 }),
+                    range: AppearanceSettings.panelWidthRange,
+                    color: Theme.separator
+                )
+
                 NowPlayingPanel()
-                    .frame(width: Metrics.panelWidth)
+                    .frame(width: appearance.panelWidth)
             }
             .frame(maxHeight: .infinity)
 
