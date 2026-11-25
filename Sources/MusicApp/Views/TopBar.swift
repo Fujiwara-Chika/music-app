@@ -243,7 +243,6 @@ struct TopBar: View {
 struct AppearancePanel: View {
     @Environment(\.palette) private var palette
     @EnvironmentObject private var store: LibraryStore
-    @EnvironmentObject private var player: PlayerEngine
     @EnvironmentObject private var appearance: AppearanceSettings
 
     var body: some View {
@@ -265,26 +264,6 @@ struct AppearancePanel: View {
                 readout: "\(Int(appearance.backgroundOpacity * 100))%"
             )
             toggleRow("背景显示专辑封面", isOn: $appearance.usesArtworkBackdrop)
-
-            Divider().padding(.vertical, 6)
-
-            Button {
-                guard let id = player.currentTrack?.id else { return }
-                store.selectedSection = .library
-                store.selectedTrackID = id
-                store.reveal(trackID: id, force: true)
-                NSApp.keyWindow?.makeFirstResponder(nil)
-            } label: {
-                Text("定位到当前播放")
-                    .font(.system(size: 12.5))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(player.currentTrack == nil)
-            .opacity(player.currentTrack == nil ? 0.45 : 1)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
         }
         .padding(.vertical, 8)
         .frame(width: 236)
