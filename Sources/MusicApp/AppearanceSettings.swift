@@ -11,7 +11,7 @@ final class AppearanceSettings: ObservableObject {
         static let backdrop = "appearance.artworkBackdrop"
     }
 
-    static let opacityRange: ClosedRange<Double> = 0.55...1.0
+    static let opacityRange: ClosedRange<Double> = 0.4...1.0
     static let blurRange: ClosedRange<Double> = 0...80
 
     /// 1.0 means "solid, exactly like before" — the slider only ever removes
