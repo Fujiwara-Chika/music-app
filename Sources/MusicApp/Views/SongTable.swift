@@ -296,7 +296,8 @@ struct SongTableAlbumRow: View {
     let group: AlbumGroup
 
     @EnvironmentObject private var store: LibraryStore
-    @EnvironmentObject private var artworkTicker: ArtworkTicker
+    /// Owned by this row: a decoded cover updates one header, not the table.
+    @State private var thumb: NSImage?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -332,6 +333,13 @@ struct SongTableAlbumRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: SongTableAlbumRow.height)
+        .task(id: group.albumKey) {
+            if let cached = store.cachedThumbnail(for: group.albumKey, maxPixel: Self.thumbPixels) {
+                thumb = cached
+            } else {
+                thumb = await store.thumbnailAsync(for: group.albumKey, maxPixel: Self.thumbPixels)
+            }
+        }
         .background(palette.albumHeaderBG)
         .overlay(alignment: .bottom) { Hairline() }
         .contentShape(Rectangle())
@@ -352,13 +360,9 @@ struct SongTableAlbumRow: View {
 
     @ViewBuilder
     private var cover: some View {
-        // Reading the ticker registers the dependency: without it this header
-        // would never redraw when its thumbnail finishes decoding (the bump no
-        // longer goes through `store`, precisely so rows do not all rebuild).
-        let _ = artworkTicker.revision
         // Thumbnail size, not the 768px file: the cell is 62pt wide, so decoding
         // the full cover only to scale it down 6× was both slower and softer.
-        if let image = store.thumbnail(for: group.albumKey, maxPixel: Self.thumbPixels) {
+        if let image = thumb ?? store.cachedThumbnail(for: group.albumKey, maxPixel: Self.thumbPixels) {
             Image(nsImage: image)
                 .resizable()
                 .aspectRatio(contentMode: .fill)
@@ -601,10 +605,14 @@ struct SongTableRowView: View {
 
 // MARK: - Container switch
 
-/// The SwiftUI table is the default. The AppKit `NSTableView` version is kept
-/// behind `--appkit-table`: it renders identically and recycles its cells, but
-/// measured no faster (26.9–28.9% vs 27.5–27.9% CPU while scrolling), and its
-/// view-based `scrollRowToVisible` needed hand-rolled clip-view scrolling.
+/// The AppKit table is the default.
+///
+/// Measured reason: the SwiftUI `LazyVStack` keeps every row it has scrolled
+/// past alive — resident memory grows 319 MB → 403 MB → 493 MB as you move from
+/// the top to the middle to the end of a 5,806-track library, and the cost per
+/// scroll step grows with it. `NSTableView` recycles its cells, so the same three
+/// depths stay at 325 / 328 / 318 MB. `--swiftui-table` keeps the old container
+/// around for comparison.
 enum AppKitTableSettings {
-    static let isEnabled = CommandLine.arguments.contains("--appkit-table")
+    static let isEnabled = !CommandLine.arguments.contains("--swiftui-table")
 }

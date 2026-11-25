@@ -570,6 +570,49 @@ final class LibraryStore: ObservableObject {
         return nil
     }
 
+    /// Pure cache read — no side effects, safe to call from a view body.
+    func cachedThumbnail(for albumKey: String, maxPixel: Int) -> NSImage? {
+        guard let image = thumbnailCache.object(forKey: "\(albumKey)@\(maxPixel)" as NSString) else {
+            return nil
+        }
+        // A 768px cover already in memory is cheaper to downscale than to re-read.
+        if let full = artworkCache.object(forKey: albumKey as NSString),
+           let small = Self.downscaled(full, maxPixel: maxPixel) {
+            thumbnailCache.setObject(small, forKey: "\(albumKey)@\(maxPixel)" as NSString)
+            return small
+        }
+        return image
+    }
+
+    /// Async thumbnail for one album row. Rows call this from `.task`, so a
+    /// finished decode only re-renders that row instead of invalidating the table.
+    func thumbnailAsync(for albumKey: String, maxPixel: Int) async -> NSImage? {
+        let key = "\(albumKey)@\(maxPixel)"
+        if let cached = thumbnailCache.object(forKey: key as NSString) { return cached }
+        if let full = artworkCache.object(forKey: albumKey as NSString),
+           let small = Self.downscaled(full, maxPixel: maxPixel) {
+            thumbnailCache.setObject(small, forKey: key as NSString)
+            return small
+        }
+        if RenderMode.isOffscreen {
+            if let image = cache.readArtwork(for: albumKey, maxPixel: maxPixel) {
+                thumbnailCache.setObject(image, forKey: key as NSString)
+                return image
+            }
+            return nil
+        }
+        guard !artworkMissing.contains(albumKey) else { return nil }
+        thumbnailLoading.insert(key)
+        let image = await decodeThumbnail(for: albumKey, maxPixel: maxPixel)
+        thumbnailLoading.remove(key)
+        if let image {
+            thumbnailCache.setObject(image, forKey: key as NSString)
+        } else {
+            refreshArtwork(albumKey, ifSmallerThan: .infinity, markingMissingOnFailure: true)
+        }
+        return image
+    }
+
     private func decodeThumbnail(for albumKey: String, maxPixel: Int) async -> NSImage? {
         let cache = self.cache
         return await Task.detached(priority: .userInitiated) {

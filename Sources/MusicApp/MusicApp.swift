@@ -195,6 +195,19 @@ struct RootView: View {
     private func applyLaunchOverrides() {
         let arguments = CommandLine.arguments
 
+        // Debug: jump the table to a fraction of the list, so scrolling cost can be
+        // measured at depth (synthetic wheel events cannot reach deep positions).
+        if let index = arguments.firstIndex(of: "--scroll-fraction"),
+           index + 1 < arguments.count,
+           let value = Double(arguments[index + 1]) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                let rows = store.rows
+                guard !rows.isEmpty else { return }
+                let target = min(rows.count - 1, max(0, Int(value * Double(rows.count - 1))))
+                store.scrollTarget = rows[target].id
+            }
+        }
+
         // Play counts and the history / most-played sides of the sidebar feed off
         // this callback; without it they stay empty no matter how much you play.
         player.onTrackStarted = { track in
