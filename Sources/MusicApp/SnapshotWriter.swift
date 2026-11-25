@@ -30,7 +30,10 @@ struct LibrarySnapshot: Codable {
 /// JSON and JPEG encoding off the main thread, and let the self-test point at a
 /// scratch directory without a mutable global.
 final class SnapshotWriter {
-    static let version = 1
+    /// Bumped when the parser learns to read something a cached snapshot may have
+    /// got wrong. v2: `trkn` / `disk` are binary atoms — v1 caches saved every
+    /// multi-disc album as "disc 1, track 1", so they must be re-read.
+    static let version = 2
 
     /// ~/Library/Application Support/local.aria.music
     static var defaultDirectory: URL {

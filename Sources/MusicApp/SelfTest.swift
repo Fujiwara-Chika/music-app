@@ -115,6 +115,7 @@ enum SelfTest {
         let okRestore = checkPlaybackMemory()
         let okDerived = checkDerivedCache(store)
         let okReveal = checkRevealRequests(store)
+        let okDiscLabels = checkDiscLabels()
         let okRescan = checkRescanKeepsStats()
         let okIncremental = checkIncrementalScan()
         let okPlaylists = checkPlaylists(store)
@@ -125,11 +126,11 @@ enum SelfTest {
         let okPaletteAsync = checkPaletteAsyncArrival()
         let okPlaylistRoundTrip = checkPlaylistRoundTrip(store)
         let ok = okPlayback && okPause && okOrder && okSort && okCache && okGroups
-            && okModes && okPalette && okRestore && okSpectrum && okDerived && okRescan && okReveal
+            && okModes && okPalette && okRestore && okSpectrum && okDerived && okRescan && okReveal && okDiscLabels
             && okIncremental
             && okPlaylists && okRowIDs && okPaletteAsync && okPlaylistRoundTrip && okEmptyScan
             && okOrdering
-        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), reveal=\(okReveal))")
+        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), reveal=\(okReveal), disclabels=\(okDiscLabels))")
         exit(ok ? 0 : 1)
     }
 
@@ -214,6 +215,24 @@ enum SelfTest {
     /// A rescan must not re-read tags for files that did not change: that is the
     /// difference between 13-17s and 0.3s on a 5,800-track library. Touching one
     /// file's mtime must cost exactly one re-parse.
+    /// A multi-disc rip restarts numbering per disc, so the row must print the
+    /// disc as well; single-disc albums keep the plain "03".
+    @MainActor
+    private static func checkDiscLabels() -> Bool {
+        var single = Track(title: "x", artist: "a", albumArtist: "a", album: "Single", url: nil)
+        single.trackNumber = 3
+        single.albumDiscCount = 1
+
+        var multi = Track(title: "y", artist: "a", albumArtist: "a", album: "Multi", url: nil)
+        multi.trackNumber = 3
+        multi.discNumber = 2
+        multi.albumDiscCount = 3
+
+        let ok = single.numberLabel == "03" && multi.numberLabel == "2-03"
+        print("selftest: disc labels — single \(single.numberLabel), multi \(multi.numberLabel): \(ok)")
+        return ok
+    }
+
     /// Asking to reveal the track that is already playing used to be swallowed:
     /// the request was "scroll to <row id>", and the coordinator skipped it when
     /// the id matched the previous request. Two reveals of the same track must

@@ -279,13 +279,31 @@ final class LibraryStore: ObservableObject {
             pool = pool.filter { members.contains($0.id) }
         }
         let q = filterText.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return pool }
-        return pool.filter {
+        guard !q.isEmpty else { return stampingDiscCounts(pool) }
+        return stampingDiscCounts(pool.filter {
             $0.title.localizedCaseInsensitiveContains(q) ||
             $0.album.localizedCaseInsensitiveContains(q) ||
             $0.artist.localizedCaseInsensitiveContains(q) ||
             $0.albumArtist.localizedCaseInsensitiveContains(q) ||
             $0.genre.localizedCaseInsensitiveContains(q)
+        })
+    }
+
+    /// Multi-disc rips restart track numbering on each disc, so the row needs the
+    /// album's disc count to print "2-03" instead of a second bare "03". Snapshot
+    /// tracks may not carry it (older caches), so stamp it here — one cheap pass
+    /// over the filtered set, and every downstream path sees the same values.
+    private func stampingDiscCounts(_ items: [Track]) -> [Track] {
+        guard !items.isEmpty else { return items }
+        var counts: [String: Int] = [:]
+        for t in items { counts[t.albumKey] = max(counts[t.albumKey] ?? 1, max(1, t.discNumber)) }
+        guard counts.values.contains(where: { $0 > 1 }) else { return items }
+        return items.map { track in
+            let n = counts[track.albumKey] ?? 1
+            guard track.albumDiscCount != n else { return track }
+            var copy = track
+            copy.albumDiscCount = n
+            return copy
         }
     }
 
@@ -985,8 +1003,18 @@ final class LibraryStore: ObservableObject {
         let base = file.url.deletingPathExtension().lastPathComponent
         if let m = filenamePattern.firstMatch(in: base, range: NSRange(base.startIndex..., in: base)),
            let titleRange = Range(m.range(at: m.numberOfRanges - 1), in: base) {
-            if let numberRange = Range(m.range(at: 1), in: base) {
-                t.trackNumber = Int(base[numberRange]) ?? 0
+            let first = Range(m.range(at: 1), in: base).flatMap { Int(base[$0]) }
+            let second = m.range(at: 2).location == NSNotFound
+                ? nil
+                : Range(m.range(at: 2), in: base).flatMap { Int(base[$0]) }
+            // "01 11 - Title" is a disc/track pair from a multi-disc rip: the first
+            // number is the disc, the second the track. "01 - Title" stays a plain
+            // track number.
+            if let first, let second, first <= 9 {
+                t.discNumber = first
+                t.trackNumber = second
+            } else {
+                t.trackNumber = first ?? 0
             }
             t.title = String(base[titleRange]).trimmingCharacters(in: .whitespaces)
         }
@@ -1024,15 +1052,9 @@ final class LibraryStore: ObservableObject {
                 } else if id.contains("%a9gen") || id.contains("gnre") {
                     if let s = try? await item.load(.stringValue), !s.isEmpty { t.genre = s }
                 } else if id.contains("trkn") || id.contains("trck") {
-                    if let s = try? await item.load(.stringValue) {
-                        let leading = s.split(separator: "/").first.map(String.init) ?? s
-                        if let n = Int(leading.trimmingCharacters(in: .whitespaces)) { t.trackNumber = n }
-                    }
+                    if let n = await Self.number(from: item) { t.trackNumber = n }
                 } else if id.contains("disk") || id.contains("tpos") {
-                    if let s = try? await item.load(.stringValue) {
-                        let leading = s.split(separator: "/").first.map(String.init) ?? s
-                        if let n = Int(leading.trimmingCharacters(in: .whitespaces)) { t.discNumber = n }
-                    }
+                    if let n = await Self.number(from: item) { t.discNumber = n }
                 } else if id.contains("covr"), artworkData == nil {
                     if let data = try? await item.load(.dataValue) { artworkData = data }
                 }
@@ -1199,7 +1221,17 @@ final class LibraryStore: ObservableObject {
         NSLog("音乐: scan finished in %.1fs — %d files, %d parsed, %d reused",
               Date().timeIntervalSince(started), ordered.count, parsed, reused)
 
-        let scanned: [Track] = ordered
+        // Stamp each album with its disc count so the table can show "2-03"
+        // for multi-disc rips instead of a bare number that repeats per disc.
+        var discCounts: [String: Int] = [:]
+        for track in ordered {
+            discCounts[track.albumKey] = max(discCounts[track.albumKey] ?? 1, max(1, track.discNumber))
+        }
+        let scanned: [Track] = ordered.map { track in
+            var copy = track
+            copy.albumDiscCount = discCounts[track.albumKey] ?? 1
+            return copy
+        }
 
         guard generation == scanGeneration, !Task.isCancelled else { return }
         guard !scanned.isEmpty else {
@@ -1256,6 +1288,27 @@ final class LibraryStore: ObservableObject {
         // The writer owns its own serial queue, so the snapshot and its covers
         // land in one ordered pass; no detached task, no global override.
         cache.write(snapshot, artworks: art)
+    }
+
+    /// `trkn` / `disk` are **binary** iTunes atoms: two reserved bytes, then
+    /// big-endian UInt16 value and total. They expose no `stringValue`, so reading
+    /// them as a string silently produced nothing (which is why every file of a
+    /// multi-disc album ended up as "disc 1, track 1"). `trck` / `tpos` are the
+    /// ID3-style "11/19" strings.
+    private static func number(from item: AVMetadataItem) async -> Int? {
+        if let data = try? await item.load(.dataValue) {
+            let bytes = [UInt8](data)
+            if bytes.count >= 4 {
+                let value = Int(bytes[bytes.count >= 4 ? 2 : 0]) << 8 | Int(bytes[3])
+                if value > 0 { return value }
+            }
+        }
+        if let s = try? await item.load(.stringValue) {
+            let leading = s.split(separator: "/").first.map(String.init) ?? s
+            if let n = Int(leading.trimmingCharacters(in: .whitespaces)), n > 0 { return n }
+        }
+        if let n = try? await item.load(.numberValue)?.intValue, n > 0 { return n }
+        return nil
     }
 
     nonisolated private static let filenamePattern = try! NSRegularExpression(

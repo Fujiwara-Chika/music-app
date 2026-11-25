@@ -12,6 +12,17 @@ struct Track: Identifiable, Hashable, Codable {
     var genre: String = ""
     var trackNumber: Int = 0
     var discNumber: Int = 1
+    /// How many discs this album has; nil (old snapshots) is treated as one.
+    /// Used only for display, so a multi-disc rip shows "2-03" instead of a
+    /// bare "03" that looks like a duplicate of disc 1.
+    var albumDiscCount: Int?
+
+    /// "03" for a single-disc album, "2-03" once the album spans several discs.
+    var numberLabel: String {
+        guard trackNumber > 0 else { return "" }
+        let number = String(format: "%02d", trackNumber)
+        return (albumDiscCount ?? 1) > 1 ? "\(discNumber)-\(number)" : number
+    }
     var year: Int = 0
     var duration: TimeInterval = 0
     /// nil for the bundled demo library (no audio on disk).

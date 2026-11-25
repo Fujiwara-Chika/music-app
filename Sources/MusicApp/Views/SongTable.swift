@@ -491,7 +491,8 @@ struct SongTableTrackRow: View {
                 .font(Typo.rowNumber)
                 .foregroundStyle(Theme.text)
                 .lineLimit(1)
-                .frame(width: 18, alignment: .trailing)
+                .frame(width: showsDisc ? 30 : 18, alignment: .trailing)
+                .padding(.trailing, showsDisc ? 2 : 0)
             Text(track.title)
                 .font(Typo.row)
                 .foregroundStyle(Theme.text)
@@ -513,10 +514,12 @@ struct SongTableTrackRow: View {
             .frame(width: width, alignment: .leading)
     }
 
-    private var numberText: String {
-        guard track.trackNumber > 0 else { return "" }
-        return String(format: "%02d", track.trackNumber)
-    }
+    /// Multi-disc rips restart numbering on every disc, so a bare "03" read as a
+    /// duplicate; prefix the disc there ("3-03"), and keep the single-disc case
+    /// exactly as before.
+    private var showsDisc: Bool { (track.albumDiscCount ?? 1) > 1 }
+
+    private var numberText: String { track.numberLabel }
 
     private var rowBackground: Color {
         if isSelected { return palette.selection }
