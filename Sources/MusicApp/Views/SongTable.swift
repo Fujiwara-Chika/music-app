@@ -9,7 +9,7 @@ import SwiftUI
 // together on narrow windows so nothing is clipped and the header stays in sync with
 // the rows.
 
-private struct SongTableColumns {
+struct SongTableColumns {
     var check: CGFloat
     var status: CGFloat
     var title: CGFloat
@@ -57,26 +57,13 @@ private struct SongTableColumns {
 struct SongTable: View {
 @Environment(\.palette) private var palette
     @EnvironmentObject private var player: PlayerEngine
-    /// One row view per `TableRow`; shared by the lazy and the eager stack.
+    /// One row view per `TableRow`; shared by the lazy stack, the eager render
+    /// path and the AppKit table.
     @ViewBuilder
     private func rowViews(_ rows: [TableRow], _ columns: SongTableColumns) -> some View {
         ForEach(rows) { row in
-            Group {
-                switch row {
-                case .album(let group):
-                    SongTableAlbumRow(group: group)
-                case .track(let track, let indented):
-                    SongTableTrackRow(
-                        track: track,
-                        indented: indented,
-                        columns: columns,
-                        onPlay: { track, queue in player.play(track, in: queue) },
-                        onToggle: { player.toggle() },
-                        onNext: { player.next() }
-                    )
-                }
-            }
-            .id(row.id)
+            SongTableRowView(row: row, columns: columns, player: player)
+                .id(row.id)
         }
     }
 
@@ -102,6 +89,27 @@ struct SongTable: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .clipped()
                         .background(palette.windowBG)
+                } else if AppKitTableSettings.isEnabled {
+                    SongTableAppKit(
+                        rows: rows,
+                        columns: columns,
+                        rowHeight: store.rowHeight,
+                        albumHeight: SongTableAlbumRow.height,
+                        palette: palette,
+                        scrollTarget: store.scrollTarget,
+                        store: store,
+                        player: player,
+                        cursor: player.cursor,
+                        ticker: store.artworkTicker
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(palette.windowBG)
+                    .onAppear {
+                        store.prefetchThumbnails(maxPixel: SongTableAlbumRow.thumbPixels)
+                    }
+                    .onChange(of: store.tracks.count) { _, _ in
+                        store.prefetchThumbnails(maxPixel: SongTableAlbumRow.thumbPixels)
+                    }
                 } else {
                     ScrollViewReader { proxy in
                         ScrollView(.vertical) {
@@ -283,7 +291,7 @@ struct SortIndicator: View {
 
 // MARK: - Album header row
 
-private struct SongTableAlbumRow: View {
+struct SongTableAlbumRow: View {
 @Environment(\.palette) private var palette
     let group: AlbumGroup
 
@@ -374,7 +382,7 @@ private struct SongTableAlbumRow: View {
 
 // MARK: - Track row
 
-private struct SongTableTrackRow: View {
+struct SongTableTrackRow: View {
 @Environment(\.palette) private var palette
     let track: Track
     let indented: Bool
@@ -561,4 +569,42 @@ private struct SongTableEmptyState: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
+
+
+// MARK: - Row factory
+
+/// Draws one `TableRow`. Shared by every container so the AppKit table and the
+/// SwiftUI list cannot drift apart.
+struct SongTableRowView: View {
+    let row: TableRow
+    let columns: SongTableColumns
+    let player: PlayerEngine
+
+    var body: some View {
+        switch row {
+        case .album(let group):
+            SongTableAlbumRow(group: group)
+        case .track(let track, let indented):
+            SongTableTrackRow(
+                track: track,
+                indented: indented,
+                columns: columns,
+                onPlay: { track, queue in player.play(track, in: queue) },
+                onToggle: { player.toggle() },
+                onNext: { player.next() }
+            )
+        }
+    }
+}
+
+
+// MARK: - Container switch
+
+/// The SwiftUI table is the default. The AppKit `NSTableView` version is kept
+/// behind `--appkit-table`: it renders identically and recycles its cells, but
+/// measured no faster (26.9–28.9% vs 27.5–27.9% CPU while scrolling), and its
+/// view-based `scrollRowToVisible` needed hand-rolled clip-view scrolling.
+enum AppKitTableSettings {
+    static let isEnabled = CommandLine.arguments.contains("--appkit-table")
 }

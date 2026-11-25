@@ -147,6 +147,24 @@ open build/音乐.app
 
 性能：分析跑在串行后台队列上、每秒 20 次，进度与电平分别放在独立的 `ObservableObject`（`ProgressClock` / `SpectrumBands` / `PlaybackCursor`）里，只有播放条和频谱条订阅高频更新；实测播放 256 kbps m4a 时整进程 CPU ≈14%（早前把它挂在 `PlayerEngine` 的 `@Published` 上、整窗 30 Hz 重绘时是 52.8%），静置为 0%。
 
+## 表格容器：为什么还是 SwiftUI
+
+试过把主表格换成真正的 AppKit `NSTableView`（`Sources/MusicApp/Views/SongTableAppKit.swift`，`NSViewRepresentable` + `NSTableViewDataSource` + `NSTableCellView` 复用 + `NSHostingView` 承载现有行视图）。渲染、点选、勾选、双击播放、配色联动全部对齐，但**没有变快**：
+
+| 容器（同一脚本、同机同库、连续 25 行/秒） | 滚动期 CPU |
+| --- | --- |
+| SwiftUI `ScrollView + LazyVStack` | 27.5% / 27.9% |
+| 退化为 `List`（macOS 上即 NSTableView） | 28.8% / 29.2% |
+| 手写 `NSTableView` + 复用单元格 | 26.9% / 28.9% |
+
+反过来，把表格过滤到 **0 行** 再滚动，CPU 仍有 10–20%：说明开销在滚动管线本身（每个滚动事件一次的窗口合成与 SwiftUI rolling edge），不在行的创建上。所以默认仍是 SwiftUI 表格，AppKit 版留在 `--appkit-table` 后面随时可对照：
+
+```bash
+open build/音乐.app --args --appkit-table
+```
+
+那条路上还踩到两个坑，也一并记在这里：view-based 表格的 `scrollRowToVisible` 对自定义行高无效（改成手动 `contentView.scroll(to:)`）；`reloadData(forRowIndexes:)` 在合成滚动事件下会留下空白行区域。
+
 ## 资料库缓存的写者
 
 ## 增量扫描
