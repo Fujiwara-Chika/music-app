@@ -83,8 +83,8 @@ final class LibraryStore: ObservableObject {
     /// by cost: browsing a large library must not grow memory without bound.
     private let artworkCache: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
-        cache.totalCostLimit = 96 * 1024 * 1024
-        cache.countLimit = 240
+        cache.totalCostLimit = 8 * 1024 * 1024
+        cache.countLimit = 6
         return cache
     }()
     private var artworkMissing: Set<String> = []
@@ -94,7 +94,7 @@ final class LibraryStore: ObservableObject {
     /// the table asks for dozens of them while scrolling.
     private let thumbnailCache: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
-        cache.countLimit = 600
+        cache.countLimit = 40
         return cache
     }()
     /// Thumbnails currently being decoded.
@@ -168,6 +168,25 @@ final class LibraryStore: ObservableObject {
     }
 
     /// Replace the visible library with a cached snapshot.
+    /// Hand the pages freed by a load/scan back to the OS. Without this the
+    /// allocator keeps the JSON decode buffers and discarded bitmaps dirty for
+    /// the life of the process, which is most of what "the app uses 130 MB"
+    /// actually is.
+    func releaseMemory() {
+        malloc_zone_pressure_relief(nil, 0)
+    }
+
+    /// Relief twice, because the big transient buffers (JSON decode, discarded
+    /// bitmaps) are released a beat after the load returns.
+    private func scheduleMemoryRelief() {
+        for delay in [0.35, 1.6] {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                releaseMemory()
+            }
+        }
+    }
+
     private func apply(_ snapshot: LibrarySnapshot) {
         NSLog("音乐: library cache hit – %d tracks (%@)", snapshot.tracks.count, snapshot.folderPath)
         activeFolderPath = snapshot.folderPath
@@ -187,6 +206,7 @@ final class LibraryStore: ObservableObject {
         sourceName = URL(fileURLWithPath: snapshot.folderPath).lastPathComponent
         selectedSection = .library
         selectedTrackID = groups.first?.tracks.first?.id ?? snapshot.tracks.first?.id
+        scheduleMemoryRelief()
     }
 
     /// Force a fresh walk of the imported folder and rewrite the snapshot.
@@ -584,6 +604,8 @@ final class LibraryStore: ObservableObject {
             if let image {
                 thumbnailCache.setObject(image, forKey: key as NSString)
                 artworkTicker.bump()
+                // Once the prefetch burst is done, return the decoder's pages.
+                if thumbnailLoading.isEmpty { scheduleMemoryRelief() }
             } else {
                 refreshArtwork(albumKey, ifSmallerThan: .infinity, markingMissingOnFailure: true)
             }
@@ -671,6 +693,9 @@ final class LibraryStore: ObservableObject {
                   !thumbnailLoading.contains(cacheKey) else { continue }
             _ = thumbnail(for: key, maxPixel: maxPixel)
         }
+        // The prefetch decodes a screenful of bitmaps; hand back what the
+        // decoders used once they are done.
+        scheduleMemoryRelief()
     }
 
     /// Blocking lookup for the offscreen renderer and tests, where there is no
@@ -1218,6 +1243,7 @@ final class LibraryStore: ObservableObject {
         guard generation == scanGeneration, !Task.isCancelled else { return }
 
         let ordered = slots.compactMap { $0 }
+        scheduleMemoryRelief()
         NSLog("音乐: scan finished in %.1fs — %d files, %d parsed, %d reused",
               Date().timeIntervalSince(started), ordered.count, parsed, reused)
 
