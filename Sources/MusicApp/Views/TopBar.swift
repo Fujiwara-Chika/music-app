@@ -16,6 +16,8 @@ import SwiftUI
 struct TopBar: View {
     @Environment(\.palette) private var palette
     @EnvironmentObject private var store: LibraryStore
+    @EnvironmentObject private var appearance: AppearanceSettings
+    @State private var showsOptions = false
     @EnvironmentObject private var player: PlayerEngine
 
     @State private var hoveredKey: String?
@@ -187,29 +189,24 @@ struct TopBar: View {
                 .font(.system(size: L.symbolSize))
                 .foregroundStyle(Theme.text.opacity(0.86))
         } else {
-            Menu {
-            Button(store.isCompactRows ? "标准行高" : "紧凑行高") {
-                withAnimation(.easeInOut(duration: 0.16)) { store.isCompactRows.toggle() }
+            Button {
+                showsOptions.toggle()
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: L.symbolSize))
+                    .foregroundStyle(Theme.text.opacity(0.86))
+                    .frame(width: L.controlSize, height: L.controlSize)
+                    .contentShape(Rectangle())
             }
-            Divider()
-            Toggle("跟随播放滚动", isOn: $store.followsPlayback)
-            Divider()
-            Button("定位到当前播放") {
-                guard let id = player.currentTrack?.id else { return }
-                store.selectedSection = .library
-                store.selectedTrackID = id
-                store.reveal(trackID: id, force: true)
-            }
-            .disabled(player.currentTrack == nil)
-        } label: {
-            Image(systemName: "ellipsis.circle")
-                .font(.system(size: L.symbolSize))
-        }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
+            .buttonStyle(.plain)
             .focusable(false)
-            .frame(width: L.controlSize)
             .accessibilityLabel("更多操作")
+            .popover(isPresented: $showsOptions, arrowEdge: .bottom) {
+                AppearancePanel()
+                    .environmentObject(store)
+                    .environmentObject(player)
+                    .environmentObject(appearance)
+            }
         }
     }
 
@@ -243,5 +240,93 @@ struct TopBar: View {
         }
         .help(help)
         .accessibilityLabel(help)
+    }
+}
+
+/// The ⋯ popover: row density, follow-playback, the two backdrop sliders and the
+/// "locate playing" shortcut. A popover (not a menu) because menus cannot hold
+/// sliders.
+struct AppearancePanel: View {
+    @Environment(\.palette) private var palette
+    @EnvironmentObject private var store: LibraryStore
+    @EnvironmentObject private var player: PlayerEngine
+    @EnvironmentObject private var appearance: AppearanceSettings
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            toggleRow("紧凑行高", isOn: Binding(
+                get: { store.isCompactRows },
+                set: { _ in withAnimation(.easeInOut(duration: 0.16)) { store.isCompactRows.toggle() } }
+            ))
+            toggleRow("跟随播放滚动", isOn: $store.followsPlayback)
+
+            Divider().padding(.vertical, 6)
+
+            sliderRow(
+                "背景模糊",
+                value: $appearance.backgroundBlur,
+                range: AppearanceSettings.blurRange,
+                readout: "\(Int(appearance.backgroundBlur)) px"
+            )
+            sliderRow(
+                "背景透明度",
+                value: $appearance.backgroundOpacity,
+                range: AppearanceSettings.opacityRange,
+                readout: "\(Int(appearance.backgroundOpacity * 100))%"
+            )
+            toggleRow("背景显示专辑封面", isOn: $appearance.usesArtworkBackdrop)
+
+            Divider().padding(.vertical, 6)
+
+            Button {
+                guard let id = player.currentTrack?.id else { return }
+                store.selectedSection = .library
+                store.selectedTrackID = id
+                store.reveal(trackID: id, force: true)
+                NSApp.keyWindow?.makeFirstResponder(nil)
+            } label: {
+                Text("定位到当前播放")
+                    .font(.system(size: 12.5))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(player.currentTrack == nil)
+            .opacity(player.currentTrack == nil ? 0.45 : 1)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+        }
+        .padding(.vertical, 8)
+        .frame(width: 236)
+        .background(palette.columnHeader)
+    }
+
+    private func toggleRow(_ title: String, isOn: Binding<Bool>) -> some View {
+        Toggle(title, isOn: isOn)
+            .toggleStyle(.checkbox)
+            .font(.system(size: 12.5))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+    }
+
+    private func sliderRow(
+        _ title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        readout: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title).font(.system(size: 12.5))
+                Spacer()
+                Text(readout)
+                    .font(.system(size: 11.5).monospacedDigit())
+                    .foregroundStyle(Theme.textDim)
+            }
+            Slider(value: value, in: range)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
     }
 }

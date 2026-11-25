@@ -147,6 +147,21 @@ open build/音乐.app
 
 性能：分析跑在串行后台队列上、每秒 20 次，进度与电平分别放在独立的 `ObservableObject`（`ProgressClock` / `SpectrumBands` / `PlaybackCursor`）里，只有播放条和频谱条订阅高频更新；实测播放 256 kbps m4a 时整进程 CPU ≈14%（早前把它挂在 `PlayerEngine` 的 `@Published` 上、整窗 30 Hz 重绘时是 52.8%），静置为 0%。
 
+## 背景通透度与模糊
+
+窗口现在是一块半透明材质，后面铺着当前曲目的封面（高斯模糊）+ 调色板薄雾。两个滑块在顶栏右侧 `⋯` 里：
+
+| 控件 | 范围 | 默认 | 作用 |
+| --- | --- | --- | --- |
+| 背景模糊 | 0–80 px | 26 px | 背后那张封面的高斯模糊半径；0 是清晰的原图 |
+| 背景透明度 | 55%–100% | 94% | 各层表面的不透明度；100% 就是不透光的旧观感 |
+| 背景显示专辑封面 | 开/关 | 开 | 关掉后退回调色板渐变 |
+
+- 实现：`AppearanceSettings` 把两个值存进 `UserDefaults`（`appearance.backgroundOpacity` / `appearance.backgroundBlur`）；`Palette.washed(by:)` 统一给所有大块表面乘上 alpha——文字、选中行、强调色保持不透明，只有背景变透，所以调低不会牺牲可读性。
+- 窗口本身改成 `isOpaque = false` + 透明背景，桌面（以及壁纸）在低透明度下会真的透进来。
+- 封面是异步解码的，背景层自己持有 `@State`，封面到了会补上，不会一直空白。
+- 命令行也能直接钉住某个观感，方便截图/复现：`open build/音乐.app --args --opacity 0.8 --blur 50`。
+
 ## 表格容器：为什么是 NSTableView
 
 主表格跑在真正的 AppKit `NSTableView` 上（`Sources/MusicApp/Views/SongTableAppKit.swift`：`NSViewRepresentable` + `NSTableViewDataSource` + `NSTableCellView` 复用 + `NSHostingView` 承载现有行视图）。原因是**「越往下滚越卡」不是错觉**：

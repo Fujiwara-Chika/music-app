@@ -106,11 +106,25 @@ struct RootView: View {
     /// Only used by the offscreen renderer, which cannot wait for a track change.
     var paletteOverride: Palette? = nil
     @StateObject private var theme = ThemeController()
+    @StateObject private var appearance = AppearanceSettings()
+    /// Cover behind the window. `artwork(for:)` is async on a cold cache, so the
+    /// backdrop keeps its own state and fills in when the bitmap lands.
+    @State private var backdropArtwork: NSImage?
+    private var backdropKey: String {
+        let track = player.currentTrack ?? store.selectedTrack
+        return (track?.albumKey ?? "") + "#" + String(store.artworkTicker.revision)
+    }
+
     /// Restoring runs once, as soon as the library has tracks to match against.
     @State private var hasRestoredSession = false
 
+    private var shownPalette: Palette {
+        (paletteOverride ?? theme.palette).washed(by: appearance.backgroundOpacity)
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
+        let shown = shownPalette
+        return VStack(spacing: 0) {
             TopBar()
                 .frame(height: Metrics.topBarHeight)
 
@@ -122,7 +136,7 @@ struct RootView: View {
                         .frame(maxHeight: .infinity)
                 }
                 .frame(width: Metrics.sidebarWidth)
-                .background(palette.windowBG)
+                .background(shown.windowBG)
 
                 SongTable()
                     .frame(maxWidth: .infinity)
@@ -137,10 +151,30 @@ struct RootView: View {
             TransportBar()
                 .frame(height: Metrics.transportHeight)
         }
-        .background(palette.windowBG)
+        .background {
+            WindowBackdrop(
+                palette: shown,
+                artwork: appearance.usesArtworkBackdrop ? backdropArtwork : nil,
+                blur: appearance.backgroundBlur,
+                opacity: appearance.backgroundOpacity
+            )
+        }
         .ignoresSafeArea(.container, edges: .top)
-        .environment(\.palette, paletteOverride ?? theme.palette)
+        .environment(\.palette, shown)
+        .environmentObject(appearance)
         .animation(.easeInOut(duration: 0.45), value: theme.palette.token)
+        .task(id: backdropKey) {
+            guard appearance.usesArtworkBackdrop,
+                  let albumKey = (player.currentTrack ?? store.selectedTrack)?.albumKey else {
+                backdropArtwork = nil
+                return
+            }
+            if let cached = store.cachedThumbnail(for: albumKey, maxPixel: 420) {
+                backdropArtwork = cached
+            } else {
+                backdropArtwork = await store.thumbnailAsync(for: albumKey, maxPixel: 420)
+            }
+        }
         .onAppear(perform: applyLaunchOverrides)
         .onChange(of: store.tracks.count) { _, _ in
             restoreSessionIfPossible()
@@ -194,6 +228,7 @@ struct RootView: View {
     /// do not inherit a shell environment, while `open ... --args` always works.
     private func applyLaunchOverrides() {
         let arguments = CommandLine.arguments
+        appearance.applyLaunchOverrides()
 
         // Debug: jump the table to a fraction of the list, so scrolling cost can be
         // measured at depth (synthetic wheel events cannot reach deep positions).

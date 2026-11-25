@@ -44,6 +44,26 @@ struct Palette: Equatable {
         token: 0
     )
 
+    /// Fades every large surface by `opacity`, so a translucent window shows the
+    /// blurred backdrop underneath. Text, selection and accents keep their weight:
+    /// only the big fills get softer.
+    func washed(by opacity: Double) -> Palette {
+        guard opacity < 0.999 else { return self }
+        let soft = max(0.12, opacity)
+        let selectionAlpha = max(0.55, opacity)
+        var p = self
+        p.windowBG = windowBG.opacity(soft)
+        p.rowBG = rowBG.opacity(soft)
+        p.columnHeader = columnHeader.opacity(soft)
+        p.albumHeaderBG = albumHeaderBG.opacity(soft)
+        p.panelBG = panelBG.opacity(soft)
+        p.transportBG = transportBG.opacity(soft)
+        p.controlBG = controlBG.opacity(soft)
+        p.selection = selection.opacity(selectionAlpha)
+        p.separator = separator.opacity(max(0.5, opacity))
+        return p
+    }
+
     // MARK: - Sampling
 
     private static func saturation(of maxComponent: Double, _ delta: Double) -> Double {
