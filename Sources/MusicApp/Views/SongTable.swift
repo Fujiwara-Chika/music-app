@@ -54,15 +54,26 @@ struct SongTableColumns {
 
 // MARK: - Table
 
+/// The only thing the table needs from the player: three closures. Taking the
+/// engine itself would make the table observe it, so every volume drag (which
+/// publishes 60 times) would reload all visible rows.
+struct SongTableActions {
+    let play: (Track, [Track]) -> Void
+    let toggle: () -> Void
+    let next: () -> Void
+}
+
 struct SongTable: View {
 @Environment(\.palette) private var palette
-    @EnvironmentObject private var player: PlayerEngine
+    let actions: SongTableActions
+    let cursor: PlaybackCursor
+    let clock: ProgressClock
     /// One row view per `TableRow`; shared by the lazy stack, the eager render
     /// path and the AppKit table.
     @ViewBuilder
     private func rowViews(_ rows: [TableRow], _ columns: SongTableColumns) -> some View {
         ForEach(rows) { row in
-            SongTableRowView(row: row, columns: columns, player: player)
+            SongTableRowView(row: row, columns: columns, actions: actions)
                 .id(row.id)
         }
     }
@@ -97,10 +108,12 @@ struct SongTable: View {
                         albumHeight: SongTableAlbumRow.height,
                         palette: palette,
                         scrollTarget: store.scrollTarget,
+                        derivedRebuilds: store.derivedRebuilds,
                         revealToken: store.revealToken,
                         store: store,
-                        player: player,
-                        cursor: player.cursor,
+                        actions: actions,
+                        cursor: cursor,
+                        clock: clock,
                         ticker: store.artworkTicker
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -299,6 +312,8 @@ struct SongTableAlbumRow: View {
     @EnvironmentObject private var store: LibraryStore
     /// Owned by this row: a decoded cover updates one header, not the table.
     @State private var thumb: NSImage?
+    /// Which album the cached thumbnail belongs to; states survive cell reuse.
+    @State private var loadedAlbumKey: String?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -335,11 +350,16 @@ struct SongTableAlbumRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: SongTableAlbumRow.height)
         .task(id: group.albumKey) {
+            // Drop the previous album's bitmap first: AppKit recycles this host
+            // view for a different album, and the state would otherwise show the
+            // old cover until the new one finishes decoding.
+            if thumb?.size != .zero, loadedAlbumKey != group.albumKey { thumb = nil }
             if let cached = store.cachedThumbnail(for: group.albumKey, maxPixel: Self.thumbPixels) {
                 thumb = cached
             } else {
                 thumb = await store.thumbnailAsync(for: group.albumKey, maxPixel: Self.thumbPixels)
             }
+            loadedAlbumKey = group.albumKey
         }
         .background(palette.albumHeaderBG)
         .overlay(alignment: .bottom) { Hairline() }
@@ -587,7 +607,7 @@ private struct SongTableEmptyState: View {
 struct SongTableRowView: View {
     let row: TableRow
     let columns: SongTableColumns
-    let player: PlayerEngine
+    let actions: SongTableActions
 
     var body: some View {
         switch row {
@@ -598,9 +618,9 @@ struct SongTableRowView: View {
                 track: track,
                 indented: indented,
                 columns: columns,
-                onPlay: { track, queue in player.play(track, in: queue) },
-                onToggle: { player.toggle() },
-                onNext: { player.next() }
+                onPlay: actions.play,
+                onToggle: actions.toggle,
+                onNext: actions.next
             )
         }
     }

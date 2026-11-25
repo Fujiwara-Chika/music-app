@@ -118,6 +118,7 @@ enum SelfTest {
         let okDiscLabels = checkDiscLabels()
         let okRescan = checkRescanKeepsStats()
         let okIncremental = checkIncrementalScan()
+        let okUpgrade = checkSnapshotUpgrade(store)
         let okPlaylists = checkPlaylists(store)
         let okEmptyScan = checkEmptyScanPersists()
         let okOrdering = checkSnapshotOrdering()
@@ -127,10 +128,10 @@ enum SelfTest {
         let okPlaylistRoundTrip = checkPlaylistRoundTrip(store)
         let ok = okPlayback && okPause && okOrder && okSort && okCache && okGroups
             && okModes && okPalette && okRestore && okSpectrum && okDerived && okRescan && okReveal && okDiscLabels
-            && okIncremental
+            && okIncremental && okUpgrade
             && okPlaylists && okRowIDs && okPaletteAsync && okPlaylistRoundTrip && okEmptyScan
             && okOrdering
-        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), reveal=\(okReveal), disclabels=\(okDiscLabels))")
+        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), upgrade=\(okUpgrade), reveal=\(okReveal), disclabels=\(okDiscLabels))")
         exit(ok ? 0 : 1)
     }
 
@@ -294,8 +295,12 @@ enum SelfTest {
         let secondRun = store.metadataReads
         let stillCounted = store.tracks.count
 
-        // Touch exactly one file, so exactly one tag read is expected.
-        let touched = folder.appendingPathComponent("gap-2.wav")
+        // Touch a file that is *not* first in enumeration order: a worker that
+        // indexes into the pending list instead of the file list only shows up
+        // once a reused file sits ahead of the changed one.
+        let titlesBefore = Set(store.tracks.map(\.title))
+        let touchedTrack = store.tracks.count > 1 ? store.tracks[1] : store.tracks[0]
+        let touched = touchedTrack.url ?? folder.appendingPathComponent("gap-2.wav")
         let future = Date().addingTimeInterval(3600)
         try? fm.setAttributes([.modificationDate: future], ofItemAtPath: touched.path)
 
@@ -306,10 +311,59 @@ enum SelfTest {
 
         let parsedOnce = firstRun == 3
         let reusedAll = secondRun == 0 && stillCounted == counted
-        let onlyTouched = thirdRun == 1 && store.tracks.count == counted
+        let titlesAfter = Set(store.tracks.map(\.title))
+        // Count alone is not enough: a slot mix-up keeps the count only by luck.
+        // The library must still hold exactly the same titles, with no duplicates.
+        let onlyTouched = thirdRun == 1
+            && store.tracks.count == counted
+            && titlesAfter == titlesBefore
+            && Set(store.tracks.map(\.url?.lastPathComponent)).count == counted
         print("selftest: incremental — parsed=\(firstRun) reused=\(counted - firstRun), "
-              + "second=\(secondRun), after-touch=\(thirdRun), tracks=\(store.tracks.count)")
+              + "second=\(secondRun), after-touch=\(thirdRun), tracks=\(store.tracks.count), "
+              + "titles-intact=\(titlesAfter == titlesBefore)")
         return parsedOnce && reusedAll && onlyTouched
+    }
+
+    /// A snapshot written by an older build must still load: every field added
+    /// since v1 is optional, and throwing the file away would silently reset the
+    /// play counts, ratings and playlists of anyone upgrading.
+    private static func checkSnapshotUpgrade(_ store: LibraryStore) -> Bool {
+        let folder = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("music-selftest-upgrade-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let writer = SnapshotWriter(directory: folder)
+        var track = Track(title: "Old Song", artist: "A", albumArtist: "A", album: "Album")
+        track.playCount = 7
+        track.rating = 4
+        var playlist = Playlist(name: "旧歌单")
+        playlist.trackIDs = [track.id]
+
+        // v1 predates fileMtime/fileSize and trackIDsByPath.
+        var old = LibrarySnapshot(folderPath: "/tmp/old", savedAt: Date(), tracks: [track])
+        old.version = 1
+        old.playlists = [playlist]
+        writer.flush(old)
+
+        guard let loaded = writer.load() else {
+            print("selftest: upgrade — v1 snapshot was rejected")
+            return false
+        }
+        let keptStats = loaded.tracks.first?.playCount == 7 && loaded.tracks.first?.rating == 4
+        let keptPlaylists = loaded.playlists?.first?.trackIDs.count == 1
+        let markedStale = loaded.version < SnapshotWriter.version
+
+        // A snapshot from a *newer* build must still be refused: we cannot know
+        // what fields it added.
+        var future = LibrarySnapshot(folderPath: "/tmp/future", savedAt: Date(), tracks: [])
+        future.version = SnapshotWriter.version + 1
+        writer.flush(future)
+        let refusedFuture = writer.load() == nil
+
+        print("selftest: upgrade — v1 loads=\(true), stats=\(keptStats), playlists=\(keptPlaylists), "
+              + "stale=\(markedStale), newer-refused=\(refusedFuture)")
+        return keptStats && keptPlaylists && markedStale && refusedFuture
     }
 
     private static func checkRescanKeepsStats() -> Bool {

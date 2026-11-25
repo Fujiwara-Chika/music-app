@@ -148,7 +148,12 @@ final class LibraryStore: ObservableObject {
             // An empty snapshot is a real state (the folder was emptied), and its
             // playlists plus the id index have to come back with it.
             apply(snapshot)
-            if snapshot.tracks.isEmpty, !cacheOnly,
+            // An empty snapshot is a real state (the folder was emptied), and an
+            // outdated one needs a re-parse: v1 saved every multi-disc album as
+            // "disc 1, track 1". Either way the counts and playlists just loaded
+            // are carried into the scan through `lastCompleteTracks`.
+            let stale = snapshot.version < SnapshotWriter.version
+            if (stale || snapshot.tracks.isEmpty), !cacheOnly,
                FileManager.default.fileExists(atPath: path) {
                 Task { await self.scan(folder: URL(fileURLWithPath: path)) }
             }
@@ -1184,12 +1189,16 @@ final class LibraryStore: ObservableObject {
         // concurrently; a slot is filled either by reusing the previous parse or
         // by a worker, and the table shows whatever is already filled.
         var slots = [Track?](repeating: nil, count: found.count)
-        var pending: [AudioFile] = []
+        // The index carried here is the position in `found`, not in `pending`:
+        // a worker's result has to land in the slot its file came from, or any
+        // reused file ahead of it would make the two sequences disagree and one
+        // slot would be written twice while another stays empty.
+        var pending: [(index: Int, file: AudioFile)] = []
         var reused = 0
         for (index, file) in found.enumerated() {
             guard let previous = previousByPath[file.url.path],
                   file.isUnchanged(since: previous) else {
-                pending.append(file)
+                pending.append((index: index, file: file))
                 continue
             }
             // Nothing moved: the parsed tags, the play count and the id all come
@@ -1209,8 +1218,7 @@ final class LibraryStore: ObservableObject {
             let width = 8
             func addNext() {
                 guard next < pending.count else { return }
-                let file = pending[next]
-                let index = next
+                let (index, file) = pending[next]
                 next += 1
                 let previous = previousByPath[file.url.path]
                 group.addTask {

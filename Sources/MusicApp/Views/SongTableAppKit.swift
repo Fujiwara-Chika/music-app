@@ -17,13 +17,19 @@ struct SongTableAppKit: NSViewRepresentable {
     /// Row id to bring into view. Passed in as a value so SwiftUI re-runs
     /// `updateNSView` when the "locate playing" request changes.
     let scrollTarget: String?
+
+    /// Bumped by `LibraryStore` whenever the derived rows are rebuilt. Row count
+    /// and first/last ids are not enough: a re-sort keeps both while every row in
+    /// between moves.
+    let derivedRebuilds: Int
     /// Request counter from `LibraryStore.reveal`; the row id alone cannot tell a
     /// repeat request apart from an already-handled one.
     let revealToken: Int
 
     let store: LibraryStore
-    let player: PlayerEngine
+    let actions: SongTableActions
     let cursor: PlaybackCursor
+    let clock: ProgressClock
     let ticker: ArtworkTicker
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -85,7 +91,7 @@ struct SongTableAppKit: NSViewRepresentable {
             guard let table else { return }
             table.rowHeight = next.rowHeight
 
-            let signature = "\(next.rows.count)|\(next.rows.first?.id ?? "")|\(next.rows.last?.id ?? "")|\(next.rowHeight)|\(next.albumHeight)|\(Int(next.columns.check + next.columns.status))"
+            let signature = "\(next.derivedRebuilds)|\(next.rows.count)|\(next.rows.first?.id ?? "")|\(next.rows.last?.id ?? "")|\(next.rowHeight)|\(next.albumHeight)|\(Int(next.columns.check + next.columns.status))"
             let needsReload = signature != layoutSignature
             layoutSignature = signature
             if needsReload {
@@ -140,10 +146,9 @@ struct SongTableAppKit: NSViewRepresentable {
             cell.configure {
                 let p = self.parent
                 return AnyView(
-                    SongTableRowView(row: tableRow, columns: p.columns, player: p.player)
+                    SongTableRowView(row: tableRow, columns: p.columns, actions: p.actions)
                         .environmentObject(p.store)
-                        .environmentObject(p.player)
-                        .environmentObject(p.player.clock)
+                        .environmentObject(p.clock)
                         .environmentObject(p.cursor)
                         .environmentObject(p.ticker)
                         .environment(\.palette, p.palette)

@@ -62,10 +62,14 @@ final class SnapshotWriter {
 
     /// Synchronous because the app reads it once, on launch, before the window
     /// appears — and a warm start has to beat the 13s scan it replaces.
+    /// Older snapshots are accepted on purpose: every field added since v1 is
+    /// optional, so a v1 file still decodes with its play counts, ratings and
+    /// playlists intact. Rejecting it would silently reset a user who upgrades —
+    /// the caller re-scans afterwards to re-parse the tags v2 fixed.
     func load() -> LibrarySnapshot? {
         guard let data = try? Data(contentsOf: snapshotURL),
               let snapshot = try? JSONDecoder().decode(LibrarySnapshot.self, from: data),
-              snapshot.version == Self.version else { return nil }
+              snapshot.version <= Self.version else { return nil }
         return snapshot
     }
 
