@@ -49,6 +49,16 @@ final class LibraryStore: ObservableObject {
     @Published var sourceName: String = "示例资料库"
     @Published var isDemoLibrary: Bool = true
     @Published var isScanning: Bool = false
+    /// Mood analysis progress for the current scan; 0/0 when idle.
+    /// Off for the self-test and the offscreen renderers: analysing a 5,800-track
+    /// library takes minutes and would race the fixtures.
+    private(set) var analysesMood: Bool
+    @Published private(set) var moodTotal: Int = 0
+    @Published private(set) var moodDone: Int = 0
+    /// Selected channel in the mood view; nil shows every channel.
+    @Published var selectedMoodChannel: MoodChannel? = nil {
+        didSet { if oldValue != selectedMoodChannel { contentVersion &+= 1 } }
+    }
     /// How many files the last scan had to open and parse. The rest were reused
     /// from the snapshot because their mtime + size had not changed.
     private(set) var metadataReads = 0
@@ -153,10 +163,11 @@ final class LibraryStore: ObservableObject {
     /// `autoLoad: false` keeps the store empty: tools (the self-test, the
     /// offscreen renderer) build their own library and must not kick off a scan
     /// of whatever folder the real app happens to have configured.
-    init(autoLoad: Bool = true, cacheOnly: Bool = false,
+    init(autoLoad: Bool = true, cacheOnly: Bool = false, analysesMood: Bool = true,
          cache: SnapshotWriter = SnapshotWriter(), defaults: UserDefaults = .standard) {
         self.cache = cache
         self.defaults = defaults
+        self.analysesMood = analysesMood
         pendingScrollRestore = Self.decodeTableScroll(defaults)
         guard autoLoad else { return }
         // A cold start shows an empty library with an "import" call to action.
@@ -234,6 +245,25 @@ final class LibraryStore: ObservableObject {
         selectedSection = .library
         selectedTrackID = groups.first?.tracks.first?.id ?? snapshot.tracks.first?.id
         scheduleMemoryRelief()
+        // A snapshot from before the mood feature has no readings: analyse it in
+        // the background instead of making the user hit ⌘R.
+        if analysesMood, snapshot.tracks.contains(where: { $0.mood == nil && $0.url != nil }) {
+            Task { await self.analyseMissingMood() }
+        }
+    }
+
+    /// Fill in `Track.mood` for whatever the snapshot did not carry, then persist.
+    func analyseMissingMood() async {
+        guard !isScanning, moodTotal == 0 else { return }
+        let input = lastCompleteTracks
+        guard input.contains(where: { $0.mood == nil && $0.url != nil }) else { return }
+        let enriched = await enrichMood(input)
+        guard !Task.isCancelled else { return }
+        // Only replace the library if it is still the one we analysed.
+        guard enriched.count == lastCompleteTracks.count else { return }
+        lastCompleteTracks = enriched
+        tracks = enriched
+        scheduleSave()
     }
 
     /// Force a fresh walk of the imported folder and rewrite the snapshot.
@@ -258,6 +288,7 @@ final class LibraryStore: ObservableObject {
         var ascending: Bool
         var playlist: UUID?
         var playlistRevision: Int
+        var moodChannel: MoodChannel?
     }
 
     private var derivedKey: DerivedKey?
@@ -272,7 +303,8 @@ final class LibraryStore: ObservableObject {
         DerivedKey(content: contentVersion, filter: filterText, mode: viewMode,
                    section: selectedSection, column: sortColumn,
                    ascending: sortAscending,
-                   playlist: selectedPlaylistID, playlistRevision: playlistRevision)
+                   playlist: selectedPlaylistID, playlistRevision: playlistRevision,
+                   moodChannel: selectedMoodChannel)
     }
 
     private func ensureDerived() {
@@ -288,6 +320,14 @@ final class LibraryStore: ObservableObject {
         derivedGroups = groups
         derivedRows = computeRows(filtered: filtered, groups: groups)
         derivedAllTracks = derivedRows.compactMap(\.track)
+    }
+
+    /// How many tracks the analyser put in a channel, for the sidebar counts.
+    func moodCount(_ channel: MoodChannel) -> Int {
+        tracks.reduce(0) { count, track in
+            guard let features = track.mood else { return count }
+            return MoodChannel.classify(features) == channel ? count + 1 : count
+        }
     }
 
     var filteredTracks: [Track] {
@@ -324,6 +364,13 @@ final class LibraryStore: ObservableObject {
            let playlist = playlists.first(where: { $0.id == playlistID }) {
             let members = Set(playlist.trackIDs)
             pool = pool.filter { members.contains($0.id) }
+        }
+        // A mood channel narrows the pool before the text search does.
+        if let channel = selectedMoodChannel, viewMode == .mood {
+            pool = pool.filter { track in
+                guard let features = track.mood else { return false }
+                return MoodChannel.classify(features) == channel
+            }
         }
         let q = filterText.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return stampingDiscCounts(pool) }
@@ -363,6 +410,7 @@ final class LibraryStore: ObservableObject {
             case .playlist, .albums, .stats: return track.albumKey
             case .artists: return track.artist.isEmpty ? "未知艺术家" : track.artist
             case .genres:  return track.genre.isEmpty ? "未分类" : track.genre
+            case .mood:    return track.mood.map { MoodChannel.classify($0).title } ?? "未知"
             }
         }
 
@@ -413,6 +461,15 @@ final class LibraryStore: ObservableObject {
 
         result.sort { a, b in
             switch viewMode {
+            case .mood:
+                // Channels read in the Walkman's order, then by tempo inside one.
+                let left = a.tracks.first?.mood, right = b.tracks.first?.mood
+                let leftIndex = left.map { MoodChannel.allCases.firstIndex(of: MoodChannel.classify($0)) ?? 0 } ?? 99
+                let rightIndex = right.map { MoodChannel.allCases.firstIndex(of: MoodChannel.classify($0)) ?? 99 } ?? 99
+                if leftIndex != rightIndex { return leftIndex < rightIndex }
+                let lt = left?.tempo ?? 0, rt = right?.tempo ?? 0
+                if lt != rt { return lt < rt }
+                return a.album.localizedStandardCompare(b.album) == .orderedAscending
             case .playlist:
                 // Library order: artist first, then the album title. Sorting by
                 // year (as the reference screenshot does for one artist) puts
@@ -1299,7 +1356,10 @@ final class LibraryStore: ObservableObject {
         }
         guard generation == scanGeneration, !Task.isCancelled else { return }
 
-        let ordered = slots.compactMap { $0 }
+        // Files that have never been analysed get their mood pass here, while the
+        // scan is still "in progress" — the table shows rows as they arrive and
+        // the sidebar shows the progress.
+        let ordered = await enrichMood(slots.compactMap { $0 })
         scheduleMemoryRelief()
         NSLog("音乐: scan finished in %.1fs — %d files, %d parsed, %d reused",
               Date().timeIntervalSince(started), ordered.count, parsed, reused)
@@ -1407,6 +1467,46 @@ final class LibraryStore: ObservableObject {
     }
 
     // MARK: - Demo library (mirrors the reference screenshot)
+
+    /// Run the offline mood analyser over tracks that do not have a reading yet.
+    ///
+    /// This is the expensive part of a first scan (each track decodes three 20 s
+    /// windows), so it is incremental: the result travels inside `Track.mood` and
+    /// the snapshot keeps it, which means the library is analysed exactly once and
+    /// a rescan only pays for files whose mtime/size changed.
+    private func enrichMood(_ input: [Track]) async -> [Track] {
+        guard analysesMood else { return input }
+        let todo = input.indices.filter { input[$0].mood == nil && input[$0].url != nil }
+        guard !todo.isEmpty else { return input }
+        moodTotal = todo.count
+        moodDone = 0
+        defer { moodTotal = 0; moodDone = 0 }
+
+        var result = input
+        let width = max(2, ProcessInfo.processInfo.activeProcessorCount / 2)
+        let started = Date()
+        await withTaskGroup(of: (Int, MoodFeatures?).self) { group in
+            var next = 0
+            func addNext() {
+                while next < todo.count {
+                    let slot = todo[next]
+                    next += 1
+                    guard let url = result[slot].url else { continue }
+                    group.addTask { (slot, MoodAnalyzer.analyze(url: url)) }
+                    return
+                }
+            }
+            for _ in 0..<min(width, todo.count) { addNext() }
+            for await (slot, features) in group {
+                if let features { result[slot].mood = features }
+                moodDone += 1
+                addNext()
+                if moodDone % 16 == 0 { await Task.yield() }
+            }
+        }
+        NSLog("音乐: mood analysis finished in %.1fs — %d tracks", Date().timeIntervalSince(started), todo.count)
+        return result
+    }
 
     func loadDemoLibrary() {
         scanGeneration &+= 1

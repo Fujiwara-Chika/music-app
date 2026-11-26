@@ -16,6 +16,7 @@ struct SidebarView: View {
         case addPlaylist
         case section(LibrarySection)
         case playlist(UUID)
+        case mood(MoodChannel)
     }
 
     private enum L {
@@ -39,6 +40,10 @@ struct SidebarView: View {
 
             ForEach(Self.sections, id: \.self) { section in
                 sectionRow(section)
+            }
+
+            if store.viewMode == .mood, store.selectedSection == .library {
+                moodChannels
             }
 
             ForEach(store.playlists) { playlist in
@@ -96,6 +101,56 @@ struct SidebarView: View {
         .contextMenu {
             Button("删除播放列表", role: .destructive) { store.removePlaylist(playlist.id) }
         }
+    }
+
+    /// The eight mood channels, with counts and a progress line while the
+    /// analyser is still working through the library.
+    private var moodChannels: some View {
+        VStack(spacing: 0) {
+            moodHeader("心情频道")
+            ForEach(MoodChannel.allCases) { channel in
+                moodRow(channel)
+            }
+            if store.moodTotal > 0 {
+                moodHeader(analysisProgress, size: 10.5, weight: .regular)
+            }
+        }
+    }
+
+    private var analysisProgress: String {
+        "正在分析心情 \(store.moodDone)/\(store.moodTotal)"
+    }
+
+    private func moodHeader(_ title: String,
+                            size: CGFloat = 10.5,
+                            weight: Font.Weight = .semibold) -> some View {
+        let inset: CGFloat = L.leading + L.iconColumn + L.titleGap
+        return Text(title)
+            .font(.system(size: size, weight: weight))
+            .foregroundStyle(Theme.textDim)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, inset)
+            .padding(.top, weight == .semibold ? 10 : 6)
+            .padding(.bottom, weight == .semibold ? 4 : 0)
+    }
+
+    private func moodRow(_ channel: MoodChannel) -> some View {
+        row(
+            key: .mood(channel),
+            symbol: channel.systemImage,
+            symbolSize: L.sectionIconSize,
+            title: channel.title,
+            count: store.moodCount(channel),
+            isSelected: store.selectedMoodChannel == channel,
+            action: { toggleMoodChannel(channel) }
+        )
+    }
+
+    private func toggleMoodChannel(_ channel: MoodChannel) {
+        store.selectedPlaylistID = nil
+        store.selectedSection = .library
+        store.viewMode = .mood
+        store.selectedMoodChannel = store.selectedMoodChannel == channel ? nil : channel
     }
 
     // MARK: - Row scaffold

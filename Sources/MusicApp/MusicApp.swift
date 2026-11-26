@@ -165,12 +165,18 @@ struct RootView: View {
                 .frame(width: Metrics.sidebarWidth)
                 .background(shown.windowBG)
 
-                SongTable(actions: SongTableActions(
-                    play: { player.play($0, in: $1) },
-                    toggle: { player.toggle() },
-                    next: { player.next() }
-                ), cursor: player.cursor, clock: player.clock)
-                    .frame(maxWidth: .infinity)
+                VStack(spacing: 0) {
+                    if store.viewMode == .mood, store.selectedSection == .library {
+                        MoodMapView()
+                    }
+                    SongTable(actions: SongTableActions(
+                        play: { player.play($0, in: $1) },
+                        toggle: { player.toggle() },
+                        next: { player.next() }
+                    ), cursor: player.cursor, clock: player.clock)
+                        .frame(maxWidth: .infinity)
+                }
+                .frame(maxWidth: .infinity)
 
                 NowPlayingPanel()
                     .frame(width: Metrics.panelWidth)
@@ -321,6 +327,19 @@ struct RootView: View {
     private func applyLaunchOverrides() {
         let arguments = CommandLine.arguments
         appearance.applyLaunchOverrides()
+
+        // Debug: open a given view mode, so a screenshot of it is reproducible.
+        if let index = arguments.firstIndex(of: "--view"), index + 1 < arguments.count,
+           let mode = ViewMode(rawValue: arguments[index + 1]) {
+            store.selectedSection = .library
+            store.viewMode = mode
+        }
+        if let index = arguments.firstIndex(of: "--mood-channel"), index + 1 < arguments.count,
+           let channel = MoodChannel(rawValue: arguments[index + 1]) {
+            store.selectedSection = .library
+            store.viewMode = .mood
+            store.selectedMoodChannel = channel
+        }
 
         // Debug: jump the table to a fraction of the list, so scrolling cost can be
         // measured at depth (synthetic wheel events cannot reach deep positions).

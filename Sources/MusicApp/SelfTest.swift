@@ -24,7 +24,7 @@ enum SelfTest {
     private static var playerDefaults: UserDefaults = .standard
 
     private static func makeStore(cacheOnly: Bool = false) -> LibraryStore {
-        LibraryStore(autoLoad: false, cacheOnly: cacheOnly, cache: scratchCache,
+        LibraryStore(autoLoad: false, cacheOnly: cacheOnly, analysesMood: false, cache: scratchCache,
                      defaults: playerDefaults)
     }
 
@@ -150,6 +150,7 @@ enum SelfTest {
         let okColumns = checkColumnLayout()
         let okUpgrade = checkSnapshotUpgrade(store)
         let okUpgradeScan = checkSnapshotUpgradeEndToEnd()
+        let okMood = checkMoodAnalysis()
         let okPlaylists = checkPlaylists(store)
         let okEmptyScan = checkEmptyScanPersists()
         let okOrdering = checkSnapshotOrdering()
@@ -168,7 +169,9 @@ enum SelfTest {
         // whose bridging to `Double` depends on how the plist encoded it (a
         // `defaults write -float` and the app's own `set(Double)` disagree), so
         // the old `as? Double` comparison failed at random.
-        let sameSnapshot = nowSnapshot == userSnapshot
+        // Compare the *decoded* snapshot, not the raw blob: JSON key order is not
+        // stable, so a rewrite with identical content used to look like tampering.
+        let sameSnapshot = Self.samePlayback(nowSnapshot, userSnapshot)
         let sameVolume = (userDefaults.object(forKey: PlayerEngine.volumeKey) as? NSNumber)?.doubleValue
             == userVolume.map { NSNumber(value: $0).doubleValue }
         let sameMode = userDefaults.object(forKey: PlayMode.storageKey) as? Int == userMode
@@ -179,10 +182,10 @@ enum SelfTest {
 
         let ok = okPlayback && okPause && okOrder && okSort && okCache && okGroups
             && okModes && okPalette && okRestore && okSpectrum && okSpectrumBlock && okDerived && okRescan && okReveal && okDiscLabels
-            && okIncremental && okUpgrade && okUpgradeScan
+            && okIncremental && okUpgrade && okUpgradeScan && okMood
             && okPlaylists && okRowIDs && okPaletteAsync && okPlaylistRoundTrip && okEmptyScan
             && okOrdering && okColumns && okStableIDs && okMedia && okNotify && okNotifySchedule && okScroll && okOpacityToken && okScratch && okUserData
-        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), spectrumbblock=\(okSpectrumBlock), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), columns=\(okColumns), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), reveal=\(okReveal), disclabels=\(okDiscLabels), media=\(okMedia), notify=\(okNotify), schedulenotify=\(okNotifySchedule), scroll=\(okScroll), opacitytoken=\(okOpacityToken), scratch=\(okScratch), userdata=\(okUserData))")
+        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), spectrumbblock=\(okSpectrumBlock), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), columns=\(okColumns), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), mood=\(okMood), reveal=\(okReveal), disclabels=\(okDiscLabels), media=\(okMedia), notify=\(okNotify), schedulenotify=\(okNotifySchedule), scroll=\(okScroll), opacitytoken=\(okOpacityToken), scratch=\(okScratch), userdata=\(okUserData))")
         exit(ok ? 0 : 1)
     }
 
@@ -264,6 +267,90 @@ enum SelfTest {
         return url
     }
 
+    /// The mood analyser has to read the two things the channels depend on:
+    /// a 120 BPM pulse must come back at about 120, and a major vs minor triad
+    /// must land on opposite sides of `valence`.
+    private static func checkMoodAnalysis() -> Bool {
+        let folder = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("mood-\(UUID().uuidString)")
+        do { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
+        catch { return false }
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        // 120 BPM click track: a short decay per beat.
+        let clickURL = folder.appendingPathComponent("click120.wav")
+        let majorURL = folder.appendingPathComponent("major.wav")
+        let minorURL = folder.appendingPathComponent("minor.wav")
+        guard makeClickTrack(clickURL, bpm: 120, seconds: 8),
+              makeTriad(majorURL, frequencies: [261.63, 329.63, 392.00], seconds: 8),
+              makeTriad(minorURL, frequencies: [220.00, 261.63, 329.63], seconds: 8)
+        else {
+            print("selftest: mood fixtures failed")
+            return false
+        }
+        guard let click = MoodAnalyzer.analyze(url: clickURL),
+              let major = MoodAnalyzer.analyze(url: majorURL),
+              let minor = MoodAnalyzer.analyze(url: minorURL)
+        else {
+            print("selftest: mood analysis returned nothing")
+            return false
+        }
+        let tempoOK = abs(click.tempo - 120) <= 6
+        let majorOK = major.key.hasPrefix("C") || major.key.hasPrefix("F") || major.key.hasPrefix("G")
+        let valenceOK = major.valence > minor.valence + 0.15
+        let channel = MoodChannel.classify(MoodFeatures(tempo: 150, valence: 0.6, energy: 0.8, key: "C"))
+        let channelOK = channel == .upbeat
+        print("selftest: mood — tempo=\(Int(click.tempo.rounded())) major=\(major.key)/\(String(format: "%+.2f", major.valence)) minor=\(minor.key)/\(String(format: "%+.2f", minor.valence)) channel=\(channel.title)")
+        return tempoOK && majorOK && valenceOK && channelOK
+    }
+
+    private static func makeClickTrack(_ url: URL, bpm: Double, seconds: Double) -> Bool {
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2) else { return false }
+        var settings = format.settings
+        settings[AVLinearPCMIsNonInterleaved] = false
+        guard let file = try? AVAudioFile(forWriting: url, settings: settings),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                            frameCapacity: AVAudioFrameCount(44_100 * seconds))
+        else { return false }
+        buffer.frameLength = AVAudioFrameCount(44_100 * seconds)
+        let beat = 60.0 / bpm
+        if let channels = buffer.floatChannelData {
+            for channel in 0..<Int(format.channelCount) {
+                for frame in 0..<Int(buffer.frameLength) {
+                    let time = Double(frame) / 44_100
+                    let phase = time.truncatingRemainder(dividingBy: beat)
+                    let envelope = exp(-phase * 60)
+                    channels[channel][frame] = Float(0.6 * envelope * sin(2 * .pi * 880 * time))
+                }
+            }
+        }
+        do { try file.write(from: buffer) } catch { return false }
+        return true
+    }
+
+    private static func makeTriad(_ url: URL, frequencies: [Double], seconds: Double) -> Bool {
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2) else { return false }
+        var settings = format.settings
+        settings[AVLinearPCMIsNonInterleaved] = false
+        guard let file = try? AVAudioFile(forWriting: url, settings: settings),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                            frameCapacity: AVAudioFrameCount(44_100 * seconds))
+        else { return false }
+        buffer.frameLength = AVAudioFrameCount(44_100 * seconds)
+        if let channels = buffer.floatChannelData {
+            for channel in 0..<Int(format.channelCount) {
+                for frame in 0..<Int(buffer.frameLength) {
+                    let time = Double(frame) / 44_100
+                    var value = 0.0
+                    for frequency in frequencies { value += sin(2 * .pi * frequency * time) }
+                    channels[channel][frame] = Float(0.12 * value)
+                }
+            }
+        }
+        do { try file.write(from: buffer) } catch { return false }
+        return true
+    }
+
     /// A rescan must not re-read tags for files that did not change: that is the
     /// difference between 13-17s and 0.3s on a 5,800-track library. Touching one
     /// file's mtime must cost exactly one re-parse.
@@ -315,6 +402,20 @@ enum SelfTest {
         print("selftest: reveal — repeat request reaches the table: \(ok)"
             + " (tokens \(before) → \(firstToken) → \(secondToken))")
         return ok
+    }
+
+    /// Same resume point, ignoring JSON key order.
+    private static func samePlayback(_ lhs: Data?, _ rhs: Data?) -> Bool {
+        if lhs == nil || rhs == nil { return lhs == nil && rhs == nil }
+        guard let a = lhs, let b = rhs,
+              let left = try? JSONDecoder().decode(PlaybackSnapshot.self, from: a),
+              let right = try? JSONDecoder().decode(PlaybackSnapshot.self, from: b) else {
+            return lhs == rhs
+        }
+        return left.filePath == right.filePath
+            && abs(left.position - right.position) < 0.001
+            && abs(left.volume - right.volume) < 0.001
+            && left.playMode == right.playMode
     }
 
     private static func checkIncrementalScan() -> Bool {
@@ -777,7 +878,7 @@ enum SelfTest {
         let defaults = playerDefaults
         defaults.set(music.path, forKey: LibraryStore.folderKey)
 
-        let store = LibraryStore(autoLoad: true, cache: SnapshotWriter(directory: cacheDir),
+        let store = LibraryStore(autoLoad: true, analysesMood: false, cache: SnapshotWriter(directory: cacheDir),
                                  defaults: defaults)
         let deadline = Date().addingTimeInterval(30)
         while store.tracks.count < 3 && Date() < deadline {
@@ -1323,7 +1424,11 @@ enum SelfTest {
     /// round trip has to keep both the list and its membership.
     private static func checkPlaylistRoundTrip(_ store: LibraryStore) -> Bool {
         let members = Array(store.allVisibleTracks.prefix(2)).map(\.id)
-        guard members.count == 2 else { return false }
+        guard members.count == 2 else {
+            NSLog("selftest: playlist round trip skipped — visible=%d tracks=%d rows=%d mode=%@",
+                  store.allVisibleTracks.count, store.tracks.count, store.rows.count, store.viewMode.rawValue)
+            return false
+        }
         let playlist = store.addPlaylist()
         for id in members { store.addToPlaylist(id, playlistID: playlist.id) }
         store.flushSnapshot()

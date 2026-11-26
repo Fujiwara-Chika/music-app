@@ -38,6 +38,7 @@ struct TopBar: View {
         (.artists, "person", "艺术家"),
         (.albums, "square.stack", "专辑"),
         (.genres, "music.note.list", "流派"),
+        (.mood, "waveform.path.ecg", "心情"),
         (.stats, "chart.bar", "播放统计"),
     ]
 

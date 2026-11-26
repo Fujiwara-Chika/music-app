@@ -33,6 +33,10 @@ struct Track: Identifiable, Hashable, Codable {
     /// is spent on files that did not move.
     var fileMtime: Date? = nil
     var fileSize: Int64? = nil
+    /// Offline reading of the file for the mood map (tempo / tonality). nil until
+    /// the analyser has seen this file; a rescan reuses it when the fingerprint
+    /// matches, so the library is analysed once.
+    var mood: MoodFeatures? = nil
 
     // Technical description, shown as "AAC | LC | 258K | 1次"
     var codec: String = "AAC"
@@ -117,7 +121,7 @@ enum SortColumn: String, CaseIterable, Identifiable {
 /// The five view tabs across the top bar. The first four change how the table
 /// groups its rows, the last one is a plain play-count ranking.
 enum ViewMode: String, CaseIterable, Identifiable {
-    case playlist, artists, albums, genres, stats
+    case playlist, artists, albums, genres, mood, stats
 
     var id: String { rawValue }
 
@@ -127,6 +131,7 @@ enum ViewMode: String, CaseIterable, Identifiable {
         case .artists:  return "艺术家"
         case .albums:   return "专辑"
         case .genres:   return "流派"
+        case .mood:     return "心情"
         case .stats:    return "播放统计"
         }
     }

@@ -32,8 +32,31 @@ enum IconPreview {
         exit(code)
     }
 
+    /// `--mood <file> …` prints the analyser's reading of each file, so the
+    /// numbers can be checked against synthetic fixtures without the UI.
+    private static func runMoodProbe(_ args: [String]) -> Bool {
+        guard let index = args.firstIndex(of: "--mood") else { return false }
+        var paths: [String] = []
+        for path in args[(index + 1)...] {
+            if path.hasPrefix("--") { break }
+            paths.append(path)
+        }
+        for path in paths {
+            guard let features = MoodAnalyzer.analyze(url: URL(fileURLWithPath: path)) else {
+                print("mood \(path): failed")
+                continue
+            }
+            let channel = MoodChannel.classify(features)
+            print(String(format: "mood %@: tempo=%.1f valence=%+.2f energy=%.2f key=%@ channel=%@",
+                         (path as NSString).lastPathComponent,
+                         features.tempo, features.valence, features.energy, features.key, channel.title))
+        }
+        return true
+    }
+
     static func runIfRequested() {
         let args = CommandLine.arguments
+        if runMoodProbe(args) { finish(0) }
         if args.contains("--render-ui") || args.contains("--render-transport")
             || args.contains("--render-icons") {
             installScratchSession()
