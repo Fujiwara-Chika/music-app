@@ -245,9 +245,9 @@ struct TopBar: View {
     }
 }
 
-/// The ⋯ popover: row density, follow-playback, the two backdrop sliders and the
-/// "locate playing" shortcut. A popover (not a menu) because menus cannot hold
-/// sliders.
+/// The ⋯ popover: follow-playback, the two backdrop sliders, the artwork
+/// backdrop switch and the track-change banner switch. A popover (not a menu)
+/// because menus cannot hold sliders.
 struct AppearancePanel: View {
     @Environment(\.palette) private var palette
     @EnvironmentObject private var store: LibraryStore
@@ -272,6 +272,10 @@ struct AppearancePanel: View {
                 readout: "\(Int(appearance.backgroundOpacity * 100))%"
             )
             toggleRow("背景显示专辑封面", isOn: $appearance.usesArtworkBackdrop)
+
+            Divider().padding(.vertical, 6)
+
+            toggleRow("切歌时显示通知", isOn: $appearance.notifyOnTrackChange)
         }
         .padding(.vertical, 8)
         .frame(width: 236)

@@ -11,6 +11,11 @@ struct MusicAppMain: App {
         // `音乐 --self-test [folder]` verifies scanning + playback without a window.
         SelfTest.runIfRequested()
         IconPreview.runIfRequested()
+        // `音乐 --notify-test` prints what the system thinks of our banners and
+        // posts one, so a silent notification can be diagnosed without a window.
+        if CommandLine.arguments.contains("--notify-test") {
+            NowPlayingNotifier.runDiagnostics()
+        }
     }
 
     var body: some Scene {
@@ -65,6 +70,12 @@ struct MusicAppMain: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // The notification centre takes its delegate before launch completes, so
+        // this cannot wait for the window (see NotificationBridge).
+        NotificationBridge.shared.install()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.appearance = NSAppearance(named: .darkAqua)
@@ -127,6 +138,9 @@ struct RootView: View {
     /// loop and no business registering global handlers.
     @State private var mediaCenter: MediaCenter?
     @State private var keyboardRouter: KeyboardRouter?
+    /// The system banner for a track change. Nil until the window appears, and a
+    /// no-op in processes without a bundle id (the render tools, the self test).
+    @State private var notifier: NowPlayingNotifier?
 
     private var shownPalette: Palette {
         (paletteOverride ?? theme.palette).washed(by: appearance.backgroundOpacity)
@@ -199,6 +213,17 @@ struct RootView: View {
             let router = KeyboardRouter()
             router.install(for: player)
             keyboardRouter = router
+
+            let notifier = NowPlayingNotifier(player: player, isEnabled: {
+                appearance.notifyOnTrackChange
+            }) { track in
+                // A thumbnail is plenty for a banner, and it keeps the temp file
+                // small enough that a track change costs nothing.
+                store.cachedThumbnail(for: track.albumKey, maxPixel: 300)
+                    ?? store.artwork(for: track.albumKey)
+            }
+            notifier.attach()
+            self.notifier = notifier
         }
         .onDisappear {
             // The window is going away; a rebuilt view tree must not leave an
@@ -207,6 +232,8 @@ struct RootView: View {
             keyboardRouter = nil
             mediaCenter?.detach()
             mediaCenter = nil
+            notifier?.detach()
+            notifier = nil
         }
         .onChange(of: store.tracks.count) { _, _ in
             restoreSessionIfPossible()

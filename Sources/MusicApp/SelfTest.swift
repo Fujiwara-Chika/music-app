@@ -157,6 +157,7 @@ enum SelfTest {
         let okPaletteAsync = checkPaletteAsyncArrival()
         let okPlaylistRoundTrip = checkPlaylistRoundTrip(store)
         let okMedia = checkMediaCenter()
+        let okNotify = checkNowPlayingNotification()
         let okScratch = checkScratchSession()
         let okUserData = userDefaults.data(forKey: PlaybackMemory.storageKey) == userSnapshot
             && userDefaults.object(forKey: PlayerEngine.volumeKey) as? Double == userVolume
@@ -166,8 +167,8 @@ enum SelfTest {
             && okModes && okPalette && okRestore && okSpectrum && okDerived && okRescan && okReveal && okDiscLabels
             && okIncremental && okUpgrade && okUpgradeScan
             && okPlaylists && okRowIDs && okPaletteAsync && okPlaylistRoundTrip && okEmptyScan
-            && okOrdering && okColumns && okStableIDs && okMedia && okScratch && okUserData
-        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), columns=\(okColumns), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), reveal=\(okReveal), disclabels=\(okDiscLabels), media=\(okMedia), scratch=\(okScratch), userdata=\(okUserData))")
+            && okOrdering && okColumns && okStableIDs && okMedia && okNotify && okScratch && okUserData
+        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), columns=\(okColumns), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), reveal=\(okReveal), disclabels=\(okDiscLabels), media=\(okMedia), notify=\(okNotify), scratch=\(okScratch), userdata=\(okUserData))")
         exit(ok ? 0 : 1)
     }
 
@@ -588,6 +589,57 @@ enum SelfTest {
 
         print("selftest: scratch session — implied=\(implied), redirected=\(redirected), user-untouched=\(userUntouched)")
         return implied && redirected && userUntouched
+    }
+
+    /// The banner's payload is data; delivery belongs to the system. Asserting the
+    /// data keeps the two-line layout and the cover wiring honest without a GUI —
+    /// and this check never touches `UNUserNotificationCenter`, which throws in a
+    /// process without a bundle id (the bare `.build` binary).
+    private static func checkNowPlayingNotification() -> Bool {
+        let track = Track(title: "通知测试", artist: "歌手", albumArtist: "歌手",
+                          album: "专辑", trackNumber: 3, duration: 42)
+        let plain = NowPlayingNotifier.content(for: track, artwork: nil)
+        let twoLines = plain.title == track.title
+            && plain.subtitle == "歌手 — 专辑"
+            && plain.body.isEmpty
+            && plain.threadIdentifier == "now-playing"
+            && plain.attachments.isEmpty
+
+        // Latin text inside the budget survives; CJK text of the same character
+        // count is twice as wide and must be trimmed.
+        let fits = NowPlayingNotifier.secondaryLine(artist: "Aimer", album: "DAWN")
+        let cjk = NowPlayingNotifier.secondaryLine(
+            artist: "ずっと真夜中でいいのに。",
+            album: "消えてしまいそうで"
+        )
+        let truncated = NowPlayingNotifier.cellWidth(of: fits) <= NowPlayingNotifier.secondaryLineLimit
+            && fits == "Aimer — DAWN"
+            && NowPlayingNotifier.cellWidth(of: cjk) <= NowPlayingNotifier.secondaryLineLimit
+            && cjk.hasSuffix("…")
+
+        // Blank tag fields must not leave a dangling dash.
+        let gaps = NowPlayingNotifier.secondaryLine(artist: "", album: "专辑") == "专辑"
+            && NowPlayingNotifier.secondaryLine(artist: "歌手", album: "   ") == "歌手"
+            && NowPlayingNotifier.secondaryLine(artist: "", album: "") == ""
+
+        // A blank `NSImage` has no representation to write, so use the filled
+        // helper the palette checks already build — and hand over something
+        // larger than the banner needs, to prove it gets downscaled.
+        guard let cover = solidImage(red: 0.2, green: 0.4, blue: 0.9, size: 768) else { return false }
+        let withCover = NowPlayingNotifier.content(for: track, artwork: cover)
+        let attachment = withCover.attachments.first
+        let url = attachment?.url
+        let pixels = url.flatMap { NSImage(contentsOf: $0)?.size } ?? .zero
+        let coverOK = withCover.attachments.count == 1
+            && url?.pathExtension == "png"
+            && max(pixels.width, pixels.height) <= NowPlayingNotifier.attachmentPixel
+        // The attachment is a temp file the system copies; clean it up here.
+        for attachment in withCover.attachments {
+            try? FileManager.default.removeItem(at: attachment.url)
+        }
+
+        print("selftest: now-playing notification — text=\(twoLines), gaps=\(gaps), trim=\(truncated), cover=\(coverOK), pixels=\(Int(pixels.width))x\(Int(pixels.height))")
+        return twoLines && gaps && truncated && coverOK
     }
 
     private static func checkSnapshotUpgradeEndToEnd() -> Bool {
@@ -1191,17 +1243,19 @@ enum SelfTest {
         return coolIsBlue && warmIsRed
     }
 
-    private static func solidImage(red: CGFloat, green: CGFloat, blue: CGFloat) -> NSImage? {
+    private static func solidImage(red: CGFloat, green: CGFloat, blue: CGFloat,
+                                   size: CGFloat = 8) -> NSImage? {
+        let side = Int(size)
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
-              let context = CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8,
+              let context = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8,
                                       bytesPerRow: 0, space: space,
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
             return nil
         }
         context.setFillColor(CGColor(colorSpace: space, components: [red, green, blue, 1]) ?? CGColor(gray: 0.5, alpha: 1))
-        context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        context.fill(CGRect(x: 0, y: 0, width: side, height: side))
         guard let cg = context.makeImage() else { return nil }
-        return NSImage(cgImage: cg, size: NSSize(width: 8, height: 8))
+        return NSImage(cgImage: cg, size: NSSize(width: size, height: size))
     }
 
     /// Closing the app must leave a usable snapshot behind; the user's real

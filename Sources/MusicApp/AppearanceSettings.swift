@@ -15,6 +15,7 @@ final class AppearanceSettings: ObservableObject {
         static let blur = "appearance.backgroundBlur"
         static let backdrop = "appearance.artworkBackdrop"
         static let columns = "layout.columnWidths"
+        static let notify = "appearance.notifyOnTrackChange"
     }
 
     static let opacityRange: ClosedRange<Double> = 0.4...1.0
@@ -38,6 +39,14 @@ final class AppearanceSettings: ObservableObject {
     @Published var usesArtworkBackdrop: Bool {
         didSet {
             defaults.set(usesArtworkBackdrop, forKey: Key.backdrop)
+        }
+    }
+
+    /// System banner on every track change. On by default — it is how the app
+    /// behaves when the window is behind something else.
+    @Published var notifyOnTrackChange: Bool {
+        didSet {
+            defaults.set(notifyOnTrackChange, forKey: Key.notify)
         }
     }
 
@@ -85,6 +94,7 @@ final class AppearanceSettings: ObservableObject {
             to: Self.blurRange
         )
         usesArtworkBackdrop = defaults.object(forKey: Key.backdrop) as? Bool ?? true
+        notifyOnTrackChange = defaults.object(forKey: Key.notify) as? Bool ?? true
         columnWidths = defaults.object(forKey: Key.columns) as? [String: Double] ?? [:]
     }
 

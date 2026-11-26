@@ -20,7 +20,7 @@
 | 队列 | 播放列表（新建/添加曲目/删除）、跟随播放自动滚动、定位到当前播放 |
 | 显示 | 配色跟随封面、背景模糊与透明度滑块（各层表面半透明，背后是那张模糊封面）、真实频谱 |
 | 交互 | 星级评分、勾选、右键菜单、拖放窗口、空格播放/暂停、系统媒体键（F7/F8/F9）与 Control Center、菜单项（`⌘O` / `⌘R` / `⌘→` / `⇧⌘M`） |
-| 工程 | 28 项无窗口自检（`--self-test`）、资源包定位自检（`--resource-check`）、离屏渲染（`--render-ui` 等）、打包脚本与 DMG |
+| 工程 | 29 项无窗口自检（`--self-test`）、资源包定位自检（`--resource-check`）、离屏渲染（`--render-ui` 等）、打包脚本与 DMG |
 
 ## 还没做的
 
@@ -80,7 +80,7 @@ open build/音乐.app
 - **播放**：AVAudioPlayer 播放真实文件，示例曲目用模拟时钟；支持进度拖动、音量拖动、随机、循环（off / all / one）。
 - **播放历史 / 最常播放**：按播放次数自动排序，`notePlay` 在开始播放时累计。
 - **评分与勾选**：右侧面板点星修改评分，表格状态列可勾选曲目。
-- **无窗口自检**：`--self-test` 一次跑完扫描、封面、播放、暂停等 28 项检查（`UserDefaults` 也沙箱化：`PlaybackMemory.store` / `LibraryStore(defaults:)` / `PlayerEngine(defaults:)` 全部指向一次性的 suite，第 28 项 `userdata` 断言跑完前后用户域**一个键都没变**（续播快照 / 音量 / 播放模式 / 导入文件夹路径）——之前用真实播放器跑 `stop()` 会把续播快照换成示例曲目；`--render-ui` / `--render-transport` 这类会 play + seek 的渲染工具同样走一次性 suite；第 27 项 `scratch` 钉住 `--autoplay` / `--scratch-session` 必须启用它，所以 `tools/shot.sh` 照常启动 App 也不会改你的续播点），终端里给出 PASS / FAIL；可以带一个文件夹参数（`--self-test /path/to/music`），默认用 `~/Music/Plex`，**该目录不存在时自动写一批 6 秒的合成 WAV 当测试夹具**，所以换台机器也能跑满。
+- **无窗口自检**：`--self-test` 一次跑完扫描、封面、播放、暂停等 29 项检查（`UserDefaults` 也沙箱化：`PlaybackMemory.store` / `LibraryStore(defaults:)` / `PlayerEngine(defaults:)` 全部指向一次性的 suite，第 28 项 `userdata` 断言跑完前后用户域**一个键都没变**（续播快照 / 音量 / 播放模式 / 导入文件夹路径）——之前用真实播放器跑 `stop()` 会把续播快照换成示例曲目；`--render-ui` / `--render-transport` 这类会 play + seek 的渲染工具同样走一次性 suite；第 27 项 `scratch` 钉住 `--autoplay` / `--scratch-session` 必须启用它，所以 `tools/shot.sh` 照常启动 App 也不会改你的续播点），终端里给出 PASS / FAIL；可以带一个文件夹参数（`--self-test /path/to/music`），默认用 `~/Music/Plex`，**该目录不存在时自动写一批 6 秒的合成 WAV 当测试夹具**，所以换台机器也能跑满。
 - **原生窗口外框**：用系统红绿灯、`Picker(.segmented)` 视图切换、标准下拉菜单与 SF Symbols 工具栏按钮，窗口标题栏透明、内容延伸到顶部；**拖动窗口只在顶栏中间那块空白处**（见下）。
 - **自绘矢量图标（仅底部播放控制）**：上一首 / 播放 / 下一首 / 停止 / 播放模式仍用 SwiftUI `Canvas` 按参考图手写路径绘制（`Views/SkinIcons.swift`，约 170 行），线宽随缩放保持恒定，配合参考图里 32pt 圆环、3px 轨道的规格。
 
@@ -115,6 +115,17 @@ open build/音乐.app
   - `MPNowPlayingInfoCenter` 发布标题 / 艺术家 / 专辑 / 时长 / 位置 / 速率 / 封面，`playbackState` 跟随播放状态。系统靠这份信息把 **F7 / F8 / F9 媒体键**、Control Center、Touch Bar 的按钮路由过来——切到别的 app 之后按 F8 仍然控制这个播放器；进度不逐帧推送，交给系统按「位置 + 速率」外推。
   - 退出时清掉注册，免得系统把媒体键继续指向已经关掉的 app。
 - 自检第 26 项 `media`：用真实 `PlayerEngine` 跑一遍 `play / pause / toggle / next / previous / seek / stop`，断言两份 now-playing 字典（播放中 / 暂停）的字段与封面槽位；再用一个真正 `attach()` 的实例断言三件事：**拖音量不重建 now-playing**（`volume-quiet`，音量按 60 Hz publish，跟这张卡无关）、**播放状态变化会重建**（`state-refresh`）、**seek 之后系统读到的时间是新值**（`seek-published`，位置存在 `ProgressClock` 里，没有订阅者，只能显式刷新）。
+
+## 切歌通知
+
+切歌时用系统通知弹一张横幅，形状照 macOS 的「正在播放」卡片做：左边 App 图标（黑胶），第一行歌名，第二行 `歌手 — 专辑`，右边专辑封面缩略图。
+
+- 两行布局靠「只填 `title` 和 `subtitle`、`body` 留空」实现——`body` 会被渲染成第三行，参考图里没有那一行。
+- 第二行按**显示宽度**截断（CJK 字形按两格算，预算 44 格，超出补「…」）。按字符数算会让「ずっと真夜中でいいのに。 — 消えてしまいそうで」这种日文折成三行，横幅忽高忽低。
+- 封面取 160px 缩略图再写 PNG，不再把 768px 原图塞进通知附件。
+- 连按 ⌘→ 只弹最后一条（220ms 去抖）；启动时正在播的那首不弹，只有真正的切歌才弹。
+- `⋯` 面板底部有「切歌时显示通知」开关（`appearance.notifyOnTrackChange`，默认开）。
+- 诊断：`open build/音乐.app --args --notify-test` 会打印 `authorization` / `alertStyle` / `add` 结果并真弹一条，用来区分「系统拒收」和「我们没发」。
 
 ## 播放模式
 

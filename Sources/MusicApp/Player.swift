@@ -249,6 +249,7 @@ final class PlayerEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
         guard let track = tracks.first(where: { matches($0, snapshot) }) else { return nil }
 
         queue = tracks
+        NSLog("音乐: engine restore \(track.title) self=\(ObjectIdentifier(self))")
         currentTrack = track
         syncCursor()
         duration = track.duration
@@ -297,6 +298,7 @@ final class PlayerEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
 
     private func start(_ track: Track) {
+        NSLog("音乐: engine start \(track.title) self=\(ObjectIdentifier(self))")
         player?.stop()
         player = nil
         currentTrack = track
