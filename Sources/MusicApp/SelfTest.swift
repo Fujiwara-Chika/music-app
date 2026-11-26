@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Foundation
 import AVFoundation
+import MediaPlayer
 
 /// Headless smoke test: `音乐 --self-test [folder]`
 ///
@@ -17,8 +18,14 @@ enum SelfTest {
         directory: URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("music-selftest-uninitialised", isDirectory: true))
 
+    /// Every store and player the suite builds reads and writes its defaults
+    /// here. `.standard` is only the value before `runIfRequested` installs the
+    /// scratch suite.
+    private static var playerDefaults: UserDefaults = .standard
+
     private static func makeStore(cacheOnly: Bool = false) -> LibraryStore {
-        LibraryStore(autoLoad: false, cacheOnly: cacheOnly, cache: scratchCache)
+        LibraryStore(autoLoad: false, cacheOnly: cacheOnly, cache: scratchCache,
+                     defaults: playerDefaults)
     }
 
     static func runIfRequested() {
@@ -43,6 +50,27 @@ enum SelfTest {
             .appendingPathComponent("music-selftest-\(UUID().uuidString)", isDirectory: true)
         scratchCache = SnapshotWriter(directory: scratch)
         defer { try? FileManager.default.removeItem(at: scratch) }
+
+        // Sandbox `UserDefaults` as well. The suite drives a real `PlayerEngine`,
+        // whose `persistPlayback`/`stop`, volume and play-mode setters all write
+        // through these — one run used to replace the user's resume snapshot with
+        // a demo track and leave the play mode changed.
+        let suiteName = "local.aria.music.selftest.\(UUID().uuidString)"
+        let scratchDefaults = UserDefaults(suiteName: suiteName) ?? .standard
+        playerDefaults = scratchDefaults
+        PlaybackMemory.store = scratchDefaults
+        defer {
+            scratchDefaults.removePersistentDomain(forName: suiteName)
+            PlaybackMemory.store = .standard
+            playerDefaults = .standard
+        }
+
+        // Probed before anything runs; `checkUserDefaultsUntouched` compares.
+        let userDefaults = UserDefaults.standard
+        let userSnapshot = userDefaults.data(forKey: PlaybackMemory.storageKey)
+        let userVolume = userDefaults.object(forKey: PlayerEngine.volumeKey) as? Double
+        let userMode = userDefaults.object(forKey: PlayMode.storageKey) as? Int
+        let userFolder = userDefaults.string(forKey: LibraryStore.folderKey)
 
         // On a machine without the sample library, fall back to a fixture the
         // test writes itself, so the suite never degrades into "everything passed
@@ -90,7 +118,7 @@ enum SelfTest {
 
         print("selftest: artwork keys = \(store.artworkCount), first album key = \(first.albumKey.debugDescription)")
 
-        let player = PlayerEngine()
+        let player = PlayerEngine(defaults: playerDefaults)
         player.play(first, in: tracks)
         wait(until: { player.progress > 0.5 }, timeout: 8)
         let reported = player.duration
@@ -128,12 +156,18 @@ enum SelfTest {
         let okRowIDs = checkRowIDs()
         let okPaletteAsync = checkPaletteAsyncArrival()
         let okPlaylistRoundTrip = checkPlaylistRoundTrip(store)
+        let okMedia = checkMediaCenter()
+        let okScratch = checkScratchSession()
+        let okUserData = userDefaults.data(forKey: PlaybackMemory.storageKey) == userSnapshot
+            && userDefaults.object(forKey: PlayerEngine.volumeKey) as? Double == userVolume
+            && userDefaults.object(forKey: PlayMode.storageKey) as? Int == userMode
+            && userDefaults.string(forKey: LibraryStore.folderKey) == userFolder
         let ok = okPlayback && okPause && okOrder && okSort && okCache && okGroups
             && okModes && okPalette && okRestore && okSpectrum && okDerived && okRescan && okReveal && okDiscLabels
             && okIncremental && okUpgrade && okUpgradeScan
             && okPlaylists && okRowIDs && okPaletteAsync && okPlaylistRoundTrip && okEmptyScan
-            && okOrdering && okColumns && okStableIDs
-        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), columns=\(okColumns), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), reveal=\(okReveal), disclabels=\(okDiscLabels))")
+            && okOrdering && okColumns && okStableIDs && okMedia && okScratch && okUserData
+        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), columns=\(okColumns), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), reveal=\(okReveal), disclabels=\(okDiscLabels), media=\(okMedia), scratch=\(okScratch), userdata=\(okUserData))")
         exit(ok ? 0 : 1)
     }
 
@@ -445,6 +479,117 @@ enum SelfTest {
         return fits && respected && draggedFits && squeezedOk && sweepOK && windowOK
     }
 
+    /// The system controls are only as good as the mapping behind them: the media
+    /// keys have to reach the same transport calls as the buttons, and the
+    /// metadata has to be complete enough for the system's "now playing" card.
+    private static func checkMediaCenter() -> Bool {
+        let store = makeStore()
+        store.loadDemoLibrary()
+        guard store.tracks.count > 2, let first = store.tracks.first else { return false }
+
+        let player = PlayerEngine(defaults: playerDefaults)
+        // `playMode` is a persisted setting: make the run deterministic, then put
+        // the user's value back.
+        let previousMode = player.playMode
+        player.playMode = .sequential
+        defer { player.playMode = previousMode }
+
+        player.play(first, in: store.tracks)
+        let media = MediaCenter(player: player) { _ in nil }
+
+        let started = player.currentTrack?.id == first.id && player.isPlaying
+        media.apply(.pause)
+        let paused = !player.isPlaying
+        media.apply(.toggle)
+        let resumed = player.isPlaying
+        media.apply(.next)
+        let advanced = player.currentTrack?.id != first.id
+        media.apply(.previous)          // the new track starts at 0s, so this steps back
+        let wentBack = player.currentTrack?.id == first.id
+        media.apply(.seek(3))
+        let sought = abs(player.progress - 3) < 0.3
+        media.apply(.stop)
+        let stopped = !player.isPlaying && player.progress == 0
+        media.apply(.play)              // from a stop, play picks the track back up
+        let replayed = player.isPlaying
+        media.apply(.stop)
+
+        // A live instance, because the observation is what `attach` installs:
+        // dragging the volume slider publishes 60 times a second and must not
+        // rebuild the now-playing card; a transport change must.
+        let live = MediaCenter(player: player) { _ in nil }
+        live.attach()
+        // Let the publishes from the transport calls above land before the
+        // baseline is taken, or their late refreshes would look like volume's.
+        settle { live.refreshCount }
+        let afterAttach = live.refreshCount
+        player.volume = 0.5
+        settle { live.refreshCount }
+        let volumeQuiet = live.refreshCount == afterAttach
+        player.toggle()
+        settle { live.refreshCount }
+        let stateSeen = live.refreshCount > afterAttach
+
+        // A scrub has to reach the system too: the position lives in
+        // `ProgressClock`, so nothing else would ever publish it.
+        let half = min(5, player.duration / 2)
+        live.apply(.seek(half))
+        let published = (MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double) ?? -1
+        let seekPublished = abs(published - half) < 0.2
+        live.detach()
+        player.stop()
+
+        // Metadata: everything a now-playing card needs, plus the artwork slot.
+        let image = NSImage(size: NSSize(width: 8, height: 8))
+        let playing = MediaCenter.info(for: first, duration: first.duration, elapsed: 12,
+                                       isPlaying: true, artwork: image)
+        let metadata = playing[MPMediaItemPropertyTitle] as? String == first.title
+            && playing[MPMediaItemPropertyArtist] as? String == first.artist
+            && playing[MPMediaItemPropertyPlaybackDuration] as? Double == first.duration
+            && playing[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double == 12
+            && playing[MPNowPlayingInfoPropertyPlaybackRate] as? Double == 1
+            && playing[MPMediaItemPropertyArtwork] != nil
+
+        let idle = MediaCenter.info(for: first, duration: first.duration, elapsed: 0,
+                                    isPlaying: false, artwork: nil)
+        let idleOK = idle[MPNowPlayingInfoPropertyPlaybackRate] as? Double == 0
+            && idle[MPMediaItemPropertyArtwork] == nil
+
+        print("selftest: media centre — play=\(started), pause=\(paused), toggle=\(resumed), next=\(advanced), previous=\(wentBack), seek=\(sought), stop=\(stopped), replay=\(replayed), info=\(metadata), idle=\(idleOK), volume-quiet=\(volumeQuiet), state-refresh=\(stateSeen), seek-published=\(seekPublished)")
+        return started && paused && resumed && advanced && wentBack && sought
+            && stopped && replayed && metadata && idleOK
+            && volumeQuiet && stateSeen && seekPublished
+    }
+
+    /// The screenshot scripts launch the real app (`--autoplay`), which plays and
+    /// seeks — that must not land in the user's session either. The rule is a
+    /// plain function so it can be asserted here, and a redirected store is
+    /// checked to be a genuinely different domain.
+    private static func checkScratchSession() -> Bool {
+        let implied = LaunchSession.needsScratchSuite(["--autoplay"])
+            && LaunchSession.needsScratchSuite(["--autoplay", "20"])
+            && LaunchSession.needsScratchSuite(["--scratch-session"])
+            && !LaunchSession.needsScratchSuite([])
+            && !LaunchSession.needsScratchSuite(["--self-test", "/tmp"])
+
+        let suite = "local.aria.music.selftest.probe.\(UUID().uuidString)"
+        guard let scratch = UserDefaults(suiteName: suite) else { return false }
+        scratch.removePersistentDomain(forName: suite)
+        let userBefore = UserDefaults.standard.data(forKey: PlaybackMemory.storageKey)
+        let savedStore = PlaybackMemory.store
+        PlaybackMemory.store = scratch
+        PlaybackMemory.save(PlaybackSnapshot(filePath: nil, album: "probe", albumArtist: "probe",
+                                             title: "probe", trackNumber: 0, position: 0,
+                                             volume: 0, playMode: 0, savedAt: Date()))
+        let redirected = scratch.data(forKey: PlaybackMemory.storageKey) != nil
+        let userUntouched = UserDefaults.standard.data(forKey: PlaybackMemory.storageKey) == userBefore
+        PlaybackMemory.store = savedStore
+        scratch.removePersistentDomain(forName: suite)
+
+        print("selftest: scratch session — implied=\(implied), redirected=\(redirected), user-untouched=\(userUntouched)")
+        return implied && redirected && userUntouched
+    }
+
     private static func checkSnapshotUpgradeEndToEnd() -> Bool {
         let fm = FileManager.default
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -488,15 +633,11 @@ enum SelfTest {
         old.playlists = [Playlist(name: "旧歌单")]
         SnapshotWriter(directory: cacheDir).flush(old)
 
-        let defaults = UserDefaults.standard
-        let previous = defaults.string(forKey: LibraryStore.folderKey)
+        let defaults = playerDefaults
         defaults.set(music.path, forKey: LibraryStore.folderKey)
-        defer {
-            if let previous { defaults.set(previous, forKey: LibraryStore.folderKey) }
-            else { defaults.removeObject(forKey: LibraryStore.folderKey) }
-        }
 
-        let store = LibraryStore(autoLoad: true, cache: SnapshotWriter(directory: cacheDir))
+        let store = LibraryStore(autoLoad: true, cache: SnapshotWriter(directory: cacheDir),
+                                 defaults: defaults)
         let deadline = Date().addingTimeInterval(30)
         while store.tracks.count < 3 && Date() < deadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
@@ -1092,7 +1233,7 @@ enum SelfTest {
         }
         let a = track("A", 1), b = track("B", 2), c = track("C", 3)
         let list = [a, b, c]
-        let player = PlayerEngine()
+        let player = PlayerEngine(defaults: playerDefaults)
         defer { player.stop() }
 
         player.playMode = .sequential
@@ -1137,6 +1278,26 @@ enum SelfTest {
     }
 
     // MARK: - Run-loop plumbing
+
+    /// Pumps the run loop until `value` has been stable for `quiet` seconds, so a
+    /// late delivery is never mistaken for a new one — and no fixed sleep decides
+    /// the outcome on a slow machine.
+    private static func settle(_ value: @escaping () -> Int,
+                              quiet: TimeInterval = 0.15, timeout: TimeInterval = 2) {
+        let deadline = Date().addingTimeInterval(timeout)
+        var last = value()
+        var stableSince = Date()
+        while Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            let now = value()
+            if now != last {
+                last = now
+                stableSince = Date()
+            } else if Date().timeIntervalSince(stableSince) >= quiet {
+                return
+            }
+        }
+    }
 
     private static func wait(until condition: () -> Bool, timeout: TimeInterval) {
         let deadline = Date().addingTimeInterval(timeout)

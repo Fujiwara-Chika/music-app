@@ -7,8 +7,37 @@ import AppKit
 ///     Music --render-icons /tmp/modes.png
 @MainActor
 enum IconPreview {
+    /// Where a render's session writes go. `.standard` until `runIfRequested`
+    /// installs the throwaway suite.
+    private static var sessionDefaults: UserDefaults = .standard
+
+    /// These tools drive a real `PlayerEngine` — they play a track and seek into
+    /// it so the screenshot is not empty — and `seek`/`stop` persist the session.
+    /// That must not rewrite the resume point the user is waiting for, so every
+    /// render runs against a scratch suite.
+    private static func installScratchSession() {
+        let suite = "local.aria.music.render.\(UUID().uuidString)"
+        let scratch = UserDefaults(suiteName: suite) ?? .standard
+        scratch.removePersistentDomain(forName: suite)
+        sessionDefaults = scratch
+        PlaybackMemory.store = scratch
+    }
+
+    /// Leaves the process with the session writes pointing back at the app's own
+    /// domain. Every render path exits right afterwards, but a combined flag set
+    /// must not inherit the scratch suite that `installScratchSession` installed.
+    private static func finish(_ code: Int32) -> Never {
+        PlaybackMemory.store = .standard
+        sessionDefaults = .standard
+        exit(code)
+    }
+
     static func runIfRequested() {
         let args = CommandLine.arguments
+        if args.contains("--render-ui") || args.contains("--render-transport")
+            || args.contains("--render-icons") {
+            installScratchSession()
+        }
         if let index = args.firstIndex(of: "--render-ui"), index + 1 < args.count {
             renderUI(URL(fileURLWithPath: args[index + 1]))
         }
@@ -36,15 +65,15 @@ enum IconPreview {
               let bitmap = NSBitmapImageRep(data: tiff),
               let png = bitmap.representation(using: .png, properties: [:]) else {
             FileHandle.standardError.write(Data("render failed\n".utf8))
-            exit(1)
+            finish(1)
         }
         do {
             try png.write(to: output)
             print("rendered \(output.path)")
-            exit(0)
+            finish(0)
         } catch {
             FileHandle.standardError.write(Data("write failed: \(error)\n".utf8))
-            exit(1)
+            finish(1)
         }
     }
 
@@ -68,7 +97,7 @@ enum IconPreview {
         let store = LibraryStore(cacheOnly: true)
         // Keep whatever the store restored; the demo is only the fallback.
         if store.tracks.isEmpty { store.loadDemoLibrary() }
-        let player = PlayerEngine()
+        let player = PlayerEngine(defaults: sessionDefaults)
         // Optional second argument: render with a specific track, which is how the
         // cover-derived palette is checked against a non-navy cover.
         let requestedTitle = args(after: "--render-ui").dropFirst().first
@@ -117,11 +146,11 @@ enum IconPreview {
               let bitmap = NSBitmapImageRep(data: tiff),
               let png = bitmap.representation(using: .png, properties: [:]) else {
             FileHandle.standardError.write(Data("render failed\n".utf8))
-            exit(1)
+            finish(1)
         }
         try? png.write(to: output)
         print("rendered \(output.path)")
-        exit(0)
+        finish(0)
     }
 
     /// Renders the whole transport bar with the demo track loaded, so the play
@@ -129,7 +158,7 @@ enum IconPreview {
     private static func renderTransport(_ output: URL) -> Never {
         let store = LibraryStore(autoLoad: false)
         store.loadDemoLibrary()
-        let player = PlayerEngine()
+        let player = PlayerEngine(defaults: sessionDefaults)
         if let first = store.tracks.first {
             player.play(first, in: store.tracks)
         }
@@ -154,15 +183,15 @@ enum IconPreview {
               let bitmap = NSBitmapImageRep(data: tiff),
               let png = bitmap.representation(using: .png, properties: [:]) else {
             FileHandle.standardError.write(Data("render failed\n".utf8))
-            exit(1)
+            finish(1)
         }
         do {
             try png.write(to: output)
             print("rendered \(output.path)")
         } catch {
             FileHandle.standardError.write(Data("write failed: \(error)\n".utf8))
-            exit(1)
+            finish(1)
         }
-        exit(0)
+        finish(0)
     }
 }

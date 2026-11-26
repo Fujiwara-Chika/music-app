@@ -10,8 +10,8 @@ final class PlayerEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published private(set) var duration: TimeInterval = 0
     /// Sequential → list loop → single loop → shuffle. Kept in UserDefaults so
     /// the app comes back the way it was left.
-    @Published var playMode: PlayMode = PlayMode(rawValue: UserDefaults.standard.integer(forKey: PlayMode.storageKey)) ?? .sequential {
-        didSet { UserDefaults.standard.set(playMode.rawValue, forKey: PlayMode.storageKey) }
+    @Published var playMode: PlayMode = .sequential {
+        didSet { defaults.set(playMode.rawValue, forKey: PlayMode.storageKey) }
     }
     /// Volume has its own key (not the session snapshot) so it survives switching
     /// tracks. 100% is the default: the reference player ships at unity gain.
@@ -32,7 +32,7 @@ final class PlayerEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
     /// after a drag does not lose the setting.
     func flushVolume() {
         volumePersistWork?.cancel()
-        UserDefaults.standard.set(volume, forKey: Self.volumeKey)
+        defaults.set(volume, forKey: Self.volumeKey)
     }
 
     /// Dragging the slider publishes on every frame; writing `UserDefaults` that
@@ -42,16 +42,22 @@ final class PlayerEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private func scheduleVolumePersist() {
         volumePersistWork?.cancel()
         let value = volume
-        let work = DispatchWorkItem { UserDefaults.standard.set(value, forKey: Self.volumeKey) }
+        let work = DispatchWorkItem { [defaults] in defaults.set(value, forKey: Self.volumeKey) }
         volumePersistWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
 
+    /// Where the small playback settings (volume, play mode) live. Injected so
+    /// the self test can run against a scratch suite — a test run must not change
+    /// what the user's next launch restores.
+    private let defaults: UserDefaults
+
     /// High-frequency state lives in separate objects so that observing the engine
     /// does not redraw the whole window on every tick.
-    override init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         super.init()
-        let defaults = UserDefaults.standard
+        playMode = PlayMode(rawValue: defaults.integer(forKey: PlayMode.storageKey)) ?? .sequential
         if defaults.bool(forKey: Self.volumeMigrationKey) {
             volume = min(max(defaults.double(forKey: Self.volumeKey), 0), 1)
         } else {

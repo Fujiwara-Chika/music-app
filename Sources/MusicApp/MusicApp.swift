@@ -4,8 +4,8 @@ import AppKit
 @main
 struct MusicAppMain: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var store = LibraryStore()
-    @StateObject private var player = PlayerEngine()
+    @StateObject private var store = LibraryStore(defaults: LaunchSession.defaults)
+    @StateObject private var player = PlayerEngine(defaults: LaunchSession.defaults)
 
     init() {
         // `音乐 --self-test [folder]` verifies scanning + playback without a window.
@@ -199,6 +199,14 @@ struct RootView: View {
             let router = KeyboardRouter()
             router.install(for: player)
             keyboardRouter = router
+        }
+        .onDisappear {
+            // The window is going away; a rebuilt view tree must not leave an
+            // event monitor or a now-playing registration pointing at the old one.
+            keyboardRouter?.remove()
+            keyboardRouter = nil
+            mediaCenter?.detach()
+            mediaCenter = nil
         }
         .onChange(of: store.tracks.count) { _, _ in
             restoreSessionIfPossible()

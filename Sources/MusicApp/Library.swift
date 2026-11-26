@@ -103,7 +103,9 @@ final class LibraryStore: ObservableObject {
     /// a scan runs, so a rescan must not take its "previous" state from there.
     private var lastCompleteTracks: [Track] = []
     private var saveTask: Task<Void, Never>?
-    private let defaults = UserDefaults.standard
+    /// Where the imported folder and the small preferences live. Injected so the
+    /// self test can point a store at a scratch suite instead of the user's.
+    private let defaults: UserDefaults
     /// Exposed so the self-test can point a store at a scratch folder.
     static let folderKey = "library.folder.path"
     /// Stable `path → id` map, independent of what the last scan happened to
@@ -135,8 +137,10 @@ final class LibraryStore: ObservableObject {
     /// `autoLoad: false` keeps the store empty: tools (the self-test, the
     /// offscreen renderer) build their own library and must not kick off a scan
     /// of whatever folder the real app happens to have configured.
-    init(autoLoad: Bool = true, cacheOnly: Bool = false, cache: SnapshotWriter = SnapshotWriter()) {
+    init(autoLoad: Bool = true, cacheOnly: Bool = false,
+         cache: SnapshotWriter = SnapshotWriter(), defaults: UserDefaults = .standard) {
         self.cache = cache
+        self.defaults = defaults
         guard autoLoad else { return }
         // A cold start shows an empty library with an "import" call to action.
         // The demo albums exist only to match the reference screenshot, and they

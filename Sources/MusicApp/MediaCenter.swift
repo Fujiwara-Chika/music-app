@@ -23,6 +23,13 @@ final class MediaCenter {
     private let artwork: (Track) -> NSImage?
     private var installed = false
     private var cancellables = Set<AnyCancellable>()
+    /// The handlers *this* instance registered. `removeTarget(nil)` would take out
+    /// every handler in the process, which is harmless with one window and wrong
+    /// as soon as there are two.
+    private var targetTokens: [(command: MPRemoteCommand, token: Any)] = []
+    /// How many times the card has been rebuilt. The self test uses it to prove
+    /// that a volume drag does *not* touch the now-playing info.
+    private(set) var refreshCount = 0
 
     init(player: PlayerEngine, artwork: @escaping (Track) -> NSImage?) {
         self.player = player
@@ -35,18 +42,43 @@ final class MediaCenter {
         guard !installed else { return }
         installed = true
         installCommands()
-
-        // `objectWillChange` fires *before* the value lands, so the refresh waits
-        // for the next runloop turn.
-        player.objectWillChange
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.refreshIfOnMain() }
-            .store(in: &cancellables)
-        player.cursor.objectWillChange
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.refreshIfOnMain() }
-            .store(in: &cancellables)
+        observe()
         refresh()
+    }
+
+    /// Stops mirroring and drops the registration. Called when the window goes
+    /// away, so a rebuilt view tree does not leave the media keys pointing at a
+    /// player nobody is driving.
+    func detach() {
+        cancellables.removeAll()
+        for entry in targetTokens { entry.command.removeTarget(entry.token) }
+        targetTokens.removeAll()
+        clear()
+        installed = false
+    }
+
+    /// Only what the now-playing card actually shows: which track, how long it is,
+    /// and whether it is playing. Subscribing to `player.objectWillChange` would
+    /// also fire for `volume`, which publishes on every slider frame — and volume
+    /// has nothing to do with this card.
+    private func observe() {
+        // `objectWillChange` lands before the value, so the refresh waits for the
+        // next runloop turn.
+        player.cursor.$trackID
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshIfOnMain() }
+            .store(in: &cancellables)
+        player.cursor.$isPlaying
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshIfOnMain() }
+            .store(in: &cancellables)
+        player.$duration
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshIfOnMain() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Remote commands
@@ -72,7 +104,7 @@ final class MediaCenter {
         bind(centre.stopCommand, .stop)
 
         centre.changePlaybackPositionCommand.isEnabled = true
-        centre.changePlaybackPositionCommand.addTarget { [weak self] event in
+        let seekToken = centre.changePlaybackPositionCommand.addTarget { [weak self] event in
             guard let event = event as? MPChangePlaybackPositionCommandEvent else {
                 return .commandFailed
             }
@@ -80,15 +112,17 @@ final class MediaCenter {
             Task { @MainActor in self?.apply(.seek(position)) }
             return .success
         }
+        targetTokens.append((centre.changePlaybackPositionCommand, seekToken))
     }
 
     private func bind(_ command: MPRemoteCommand, _ action: Action) {
         command.isEnabled = true
         // The command centre makes no promise about the calling thread.
-        command.addTarget { [weak self] _ in
+        let token = command.addTarget { [weak self] _ in
             Task { @MainActor in self?.apply(action) }
             return .success
         }
+        targetTokens.append((command, token))
     }
 
     /// The transport side of a remote command.
@@ -111,6 +145,11 @@ final class MediaCenter {
         case .seek(let time):
             player.seek(to: time)
         }
+        // The position lives in `ProgressClock`, which nothing here observes, so a
+        // scrub from Control Center would otherwise leave the system believing the
+        // old time until the next play/pause. `stop` also resets the position
+        // after it flips `isPlaying`, so refreshing here keeps the order straight.
+        refresh()
     }
 
     // MARK: - Now playing
@@ -118,6 +157,7 @@ final class MediaCenter {
     /// Republished from the player's own changes; call it directly after anything
     /// the observers cannot see.
     func refresh() {
+        refreshCount &+= 1
         let centre = MPNowPlayingInfoCenter.default()
         guard let track = player.currentTrack else {
             centre.nowPlayingInfo = nil
