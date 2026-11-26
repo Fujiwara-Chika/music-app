@@ -161,6 +161,7 @@ enum SelfTest {
         let okNotify = checkNowPlayingNotification()
         let okNotifySchedule = checkNotificationScheduling()
         let okScroll = checkTableScrollRestore()
+        let okOpacityToken = checkOpacityRenderToken()
         let okScratch = checkScratchSession()
         let okUserData = userDefaults.data(forKey: PlaybackMemory.storageKey) == userSnapshot
             && userDefaults.object(forKey: PlayerEngine.volumeKey) as? Double == userVolume
@@ -170,8 +171,8 @@ enum SelfTest {
             && okModes && okPalette && okRestore && okSpectrum && okSpectrumBlock && okDerived && okRescan && okReveal && okDiscLabels
             && okIncremental && okUpgrade && okUpgradeScan
             && okPlaylists && okRowIDs && okPaletteAsync && okPlaylistRoundTrip && okEmptyScan
-            && okOrdering && okColumns && okStableIDs && okMedia && okNotify && okNotifySchedule && okScroll && okScratch && okUserData
-        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), spectrumbblock=\(okSpectrumBlock), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), columns=\(okColumns), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), reveal=\(okReveal), disclabels=\(okDiscLabels), media=\(okMedia), notify=\(okNotify), schedulenotify=\(okNotifySchedule), scroll=\(okScroll), scratch=\(okScratch), userdata=\(okUserData))")
+            && okOrdering && okColumns && okStableIDs && okMedia && okNotify && okNotifySchedule && okScroll && okOpacityToken && okScratch && okUserData
+        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), spectrumbblock=\(okSpectrumBlock), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), columns=\(okColumns), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), reveal=\(okReveal), disclabels=\(okDiscLabels), media=\(okMedia), notify=\(okNotify), schedulenotify=\(okNotifySchedule), scroll=\(okScroll), opacitytoken=\(okOpacityToken), scratch=\(okScratch), userdata=\(okUserData))")
         exit(ok ? 0 : 1)
     }
 
@@ -1460,6 +1461,25 @@ enum SelfTest {
         let ok = restored == TableScrollSnapshot(rowID: "track:ABC", offsetInRow: 37.5)
             && handedOutOnce
         print("selftest: table scroll — restored=\(restored?.rowID ?? "nil") offset=\(restored?.offsetInRow ?? -1) once=\(handedOutOnce)")
+        return ok
+    }
+
+    /// The table rows live in AppKit and only repaint when the render token
+    /// changes. `washed()` changes surface alpha without changing `palette.token`,
+    /// so the token must carry the wash itself — otherwise the opacity slider
+    /// leaves the centre column on its old opaque palette while the SwiftUI
+    /// sidebar and panel follow along ("opacity only affects the left").
+    private static func checkOpacityRenderToken() -> Bool {
+        let store = makeStore()
+        let cursor = PlaybackCursor()
+        let columns = SongTableColumns.resolved(for: 729)
+        let palette = Palette.reference
+        let full = songTableRenderToken(columns: columns, store: store, palette: palette,
+                                        cursor: cursor, backgroundOpacity: 1.0)
+        let half = songTableRenderToken(columns: columns, store: store, palette: palette,
+                                        cursor: cursor, backgroundOpacity: 0.5)
+        let ok = full != half
+        print("selftest: opacity render token — differs=\(ok)")
         return ok
     }
 

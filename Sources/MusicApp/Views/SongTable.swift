@@ -118,8 +118,14 @@ struct SongTableColumns {
 /// here; a volume drag (which publishes 60 times a second) does not.
 @MainActor
 func songTableRenderToken(columns: SongTableColumns, store: LibraryStore,
-                          palette: Palette, cursor: PlaybackCursor) -> String {
+                          palette: Palette, cursor: PlaybackCursor,
+                          backgroundOpacity: Double) -> String {
     var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
+    // `washed()` only changes the surfaces' alpha, not `palette.token`, so the
+    // opacity slider would otherwise leave the AppKit rows on their old opaque
+    // palette while the SwiftUI sidebar/panel updated — "opacity only affects the
+    // left". The wash is part of what the rows paint, so it belongs in the token.
+    token += "|alpha(\(Int((backgroundOpacity * 1000).rounded())))"
     token += "|\(cursor.trackID?.uuidString ?? "")"
     token += "|\(store.selectedTrackID?.uuidString ?? "")"
     token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
@@ -187,7 +193,8 @@ struct SongTable: View {
                         scrollTarget: store.scrollTarget,
                         derivedRebuilds: store.derivedRebuilds,
                         renderToken: songTableRenderToken(columns: columns, store: store,
-                                                          palette: palette, cursor: cursor),
+                                                          palette: palette, cursor: cursor,
+                                                          backgroundOpacity: appearance.backgroundOpacity),
                         revealToken: store.revealToken,
                         store: store,
                         actions: actions,

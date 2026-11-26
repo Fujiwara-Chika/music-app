@@ -227,6 +227,7 @@ open build/音乐.app
 | 背景显示专辑封面 | 开/关 | 开 | 关掉后退回调色板渐变 |
 
 - 实现：`AppearanceSettings` 把两个值存进 `UserDefaults`（`appearance.backgroundOpacity` / `appearance.backgroundBlur`）；`Palette.washed(by:)` 统一给窗口、行、列头、专辑头、面板、底栏这些大块表面乘上 alpha——文字、选中行、强调色保持不透明，只有背景变透，所以调低不会牺牲可读性。
+- 表格是 AppKit 的 `NSTableView`，行只有在 render token 变化时才重绘。`washed()` 只改 alpha、不改 `palette.token`，所以透明度也进了 token——否则拖动滑块时侧栏/面板跟着变透，中间那张表却留在旧的不透明调色板（「透明度只作用于左边」）。
 - 窗口本身还是不透明窗口：透出来的是**窗口内**那张模糊封面，桌面不会透进来。想连桌面一起透，需要把窗口改成 `isOpaque = false` 并去掉 `WindowGroup` 的不透明底色（这一版没做，因为封面的模糊层本身就是为了当背景用的）。
 - 封面是异步解码的，背景层自己持有 `@State`，封面到了会补上，不会一直空白。
 - 命令行也能直接钉住某个观感，方便截图/复现：`open build/音乐.app --args --opacity 0.8 --blur 50`。
