@@ -24,7 +24,7 @@ struct MusicAppMain: App {
                 .environmentObject(player.bands)
                 .preferredColorScheme(.dark)
                 .background(Palette.reference.windowBG)
-                .frame(minWidth: 940, minHeight: 560)
+                .frame(minWidth: Metrics.windowMinWidth, minHeight: Metrics.windowMinHeight)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: Metrics.windowWidth, height: Metrics.windowHeight)
@@ -38,8 +38,7 @@ struct MusicAppMain: App {
                 Button("载入示例资料库") { store.loadDemoLibrary() }
             }
             CommandMenu("播放") {
-                Button("播放 / 暂停") { player.toggle() }
-                    .keyboardShortcut(.space, modifiers: [])
+                Button("播放 / 暂停（空格）") { player.toggle() }
                 Button("下一首") { player.next() }
                     .keyboardShortcut(.rightArrow, modifiers: .command)
                 Button("上一首") { player.previous() }
@@ -73,12 +72,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let window = NSApp.windows.first(where: { $0.canBecomeKey }) else { return }
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
-            // Dragging by the background keeps the chrome usable. AppKit then walks
-            // the view tree per commit for its draggable regions (measured ~5% of the
-            // main thread while scrolling), so a custom grip view was tried — but
-            // SwiftUI never routes the mouse-down there, and losing window dragging
-            // would be a regression.
-            window.isMovableByWindowBackground = true
+            // Window dragging is deliberately *not* enabled for the whole
+            // background: that made every empty pixel of the table and sidebar a
+            // drag handle, so a click that missed a row could move the window.
+            // `Views/WindowDragHandle.swift` is the handle, in the top bar's blank
+            // middle, and it forwards to `performDrag(with:)` so snapping, Spaces
+            // and double-click-to-zoom still work.
+            window.isMovableByWindowBackground = false
             window.backgroundColor = NSColor(Palette.reference.windowBG)
             // The real traffic lights, in their usual place: a transparent title
             // bar with the system buttons is what makes a window read as macOS.
@@ -87,8 +87,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
                 window.standardWindowButton(type)?.isHidden = false
             }
-            window.setContentSize(NSSize(width: Metrics.windowWidth, height: Metrics.windowHeight))
-            window.center()
+            // No `setContentSize` / `center()` here on purpose: SwiftUI persists the
+            // window frame, and forcing a size or position at launch would override
+            // whatever the user last chose. `.defaultSize` covers the first launch.
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
         }
@@ -121,6 +122,12 @@ struct RootView: View {
     /// Restoring runs once, as soon as the library has tracks to match against.
     @State private var hasRestoredSession = false
 
+    /// System-level controls (media keys, Control Center) and the keyboard router.
+    /// Created once, after the window appears: the offscreen renderer has no run
+    /// loop and no business registering global handlers.
+    @State private var mediaCenter: MediaCenter?
+    @State private var keyboardRouter: KeyboardRouter?
+
     private var shownPalette: Palette {
         (paletteOverride ?? theme.palette).washed(by: appearance.backgroundOpacity)
     }
@@ -138,17 +145,8 @@ struct RootView: View {
                     SidebarView()
                         .frame(maxHeight: .infinity)
                 }
-                .frame(width: appearance.sidebarWidth)
-            .onChange(of: appearance.sidebarWidth) { _, new in NSLog("音乐: root saw sidebar \(new)") }
+                .frame(width: Metrics.sidebarWidth)
                 .background(shown.windowBG)
-
-                PaneResizer(
-                    edge: .trailing,
-                    width: Binding(get: { appearance.sidebarWidth },
-                                   set: { appearance.sidebarWidth = $0 }),
-                    range: AppearanceSettings.sidebarWidthRange,
-                    color: Theme.separator
-                )
 
                 SongTable(actions: SongTableActions(
                     play: { player.play($0, in: $1) },
@@ -157,16 +155,8 @@ struct RootView: View {
                 ), cursor: player.cursor, clock: player.clock)
                     .frame(maxWidth: .infinity)
 
-                PaneResizer(
-                    edge: .leading,
-                    width: Binding(get: { appearance.panelWidth },
-                                   set: { appearance.panelWidth = $0 }),
-                    range: AppearanceSettings.panelWidthRange,
-                    color: Theme.separator
-                )
-
                 NowPlayingPanel()
-                    .frame(width: appearance.panelWidth)
+                    .frame(width: Metrics.panelWidth)
             }
             .frame(maxHeight: .infinity)
 
@@ -199,6 +189,17 @@ struct RootView: View {
             }
         }
         .onAppear(perform: applyLaunchOverrides)
+        .task {
+            guard !RenderMode.isOffscreen, mediaCenter == nil else { return }
+            let centre = MediaCenter(player: player) { track in
+                store.artwork(for: track.albumKey)
+            }
+            centre.attach()
+            mediaCenter = centre
+            let router = KeyboardRouter()
+            router.install(for: player)
+            keyboardRouter = router
+        }
         .onChange(of: store.tracks.count) { _, _ in
             restoreSessionIfPossible()
             adoptCurrentPalette()
@@ -218,6 +219,8 @@ struct RootView: View {
             // The library snapshot is debounced by 2s, so a playlist or rating
             // made just before ⌘Q would otherwise never reach the disk.
             store.flushSnapshot()
+            // Otherwise the system keeps the media keys pointed at a dead app.
+            mediaCenter?.clear()
         }
     }
 
@@ -342,6 +345,9 @@ struct FilterStrip: View {
                             .font(Typo.row)
                             .foregroundStyle(Theme.text)
                             .focused($focused)
+                            // Return leaves the field too, so the keyboard goes
+                            // back to the player without a click.
+                            .onSubmit { focused = false }
                     }
                 }
                 if !store.filterText.isEmpty {
@@ -383,6 +389,12 @@ struct FilterStrip: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(palette.columnHeader)
         .clipped()
+        .task {
+            // The window hands the keyboard to the first text field when it
+            // appears. Take it back: space is play/pause from the first
+            // keystroke, and clicking this field still focuses it as usual.
+            focused = false
+        }
     }
 }
 

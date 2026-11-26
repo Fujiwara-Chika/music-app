@@ -60,6 +60,11 @@ enum Theme {
 enum Metrics {
     static let windowWidth: CGFloat   = 1148
     static let windowHeight: CGFloat  = 737
+    /// The window is free to be resized and moved (its frame is remembered by
+    /// SwiftUI); this is only the point below which the three panes stop making
+    /// sense — 160 sidebar + 257 panel + a table with room for its minimums.
+    static let windowMinWidth: CGFloat = 720
+    static let windowMinHeight: CGFloat = 480
 
     static let topBarHeight: CGFloat   = 52
     static let headerRowHeight: CGFloat = 26

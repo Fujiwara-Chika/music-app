@@ -22,6 +22,7 @@ struct SongTableColumns {
     private static let baseAlbum: CGFloat = 160.5
     private static let baseArtist: CGFloat = 93
     private static let baseAlbumArtist: CGFloat = 98
+    private static let baseGenre: CGFloat = 92
 
     /// Width keys, also used as the persistence keys for the user's own widths.
     static let keyTitle = "title"
@@ -30,65 +31,100 @@ struct SongTableColumns {
     static let keyAlbumArtist = "albumArtist"
     static let keyGenre = "genre"
 
+    /// The columns whose divider can be dragged, in layout order. Genre is not
+    /// here on purpose: it is the filler, so its width is whatever is left and a
+    /// grip on it would do nothing.
+    static let resizableKeys = [keyTitle, keyAlbum, keyArtist, keyAlbumArtist]
+
     /// The narrowest each column may get while still showing something.
     static let minimums: [String: Double] = [
-        keyTitle: 120, keyAlbum: 88, keyArtist: 70, keyAlbumArtist: 78, keyGenre: 70
+        keyTitle: 120, keyAlbum: 88, keyArtist: 70, keyAlbumArtist: 78,
+        keyGenre: Double(Metrics.colGenreMin)
     ]
 
-    /// `overrides` carries the widths the user dragged. Columns without an
-    /// override keep the proportional layout; genre always takes the remainder so
-    /// the row still fills the table exactly.
+    /// One layout pass. Each column asks for its reference width, or the width
+    /// the user dragged it to, and the row is then made to end exactly at the
+    /// table's trailing edge.
+    ///
+    /// When the desired widths do not fit, they all give up the room they have
+    /// above their minimum — proportionally, so the wider columns yield more and
+    /// none of them collapses or spills past the edge. Only when the table is
+    /// narrower than every minimum added together are the minimums themselves
+    /// scaled, because a clipped row is worse than a cramped one.
     static func resolved(for width: CGFloat, overrides: [String: Double] = [:]) -> SongTableColumns {
         let check = Metrics.colCheck
         let status = Metrics.colStatus
         let available = max(0, width - check - status)
 
-        func wanted(_ key: String, _ base: CGFloat) -> CGFloat {
-            guard let stored = overrides[key] else { return base }
-            return max(CGFloat(minimums[key] ?? 0), CGFloat(stored))
+        let keys = [keyTitle, keyAlbum, keyArtist, keyAlbumArtist, keyGenre]
+        let bases = [baseTitle, baseAlbum, baseArtist, baseAlbumArtist, baseGenre]
+        let floors = keys.map { CGFloat(minimums[$0] ?? 0) }
+        var wanted = zip(keys, bases).map { key, base in
+            max(CGFloat(minimums[key] ?? 0), overrides[key].map { CGFloat($0) } ?? base)
         }
 
-        var title = wanted(keyTitle, baseTitle)
-        var album = wanted(keyAlbum, baseAlbum)
-        var artist = wanted(keyArtist, baseArtist)
-        var albumArtist = wanted(keyAlbumArtist, baseAlbumArtist)
-        let minGenre = CGFloat(minimums[keyGenre] ?? Metrics.colGenreMin)
-
-        let flexible = title + album + artist + albumArtist
-        if overrides.isEmpty {
-            // Untouched table: scale the reference widths to the window.
-            let scale: CGFloat = available >= flexible + minGenre
-                ? 1
-                : max(0, (available - minGenre) / flexible)
-            title *= scale
-            album *= scale
-            artist *= scale
-            albumArtist *= scale
-        } else if available - flexible < minGenre {
-            // The dragged widths no longer fit: shrink the flexible ones
-            // proportionally, never below their minimums.
-            let room = max(0, available - minGenre)
-            let scale = flexible > 0 ? min(1, room / flexible) : 0
-            title = max(CGFloat(minimums[keyTitle] ?? 0), title * scale)
-            album = max(CGFloat(minimums[keyAlbum] ?? 0), album * scale)
-            artist = max(CGFloat(minimums[keyArtist] ?? 0), artist * scale)
-            albumArtist = max(CGFloat(minimums[keyAlbumArtist] ?? 0), albumArtist * scale)
+        let wantedTotal = wanted.reduce(0, +)
+        let floorTotal = floors.reduce(0, +)
+        if wantedTotal <= available {
+            // Room to spare goes to genre, so the row reaches the right edge.
+            wanted[wanted.count - 1] += available - wantedTotal
+        } else if available >= floorTotal {
+            let factor = (available - floorTotal) / (wantedTotal - floorTotal)
+            wanted = zip(wanted, floors).map { $0 - ($0 - $1) * (1 - factor) }
+        } else {
+            let scale = floorTotal > 0 ? available / floorTotal : 0
+            wanted = floors.map { $0 * scale }
         }
 
-        let genre = max(minGenre, available - title - album - artist - albumArtist)
-        return SongTableColumns(
-            check: check,
-            status: status,
-            title: title,
-            album: album,
-            artist: artist,
-            albumArtist: albumArtist,
-            genre: genre
-        )
+        return SongTableColumns(check: check, status: status,
+                                title: wanted[0], album: wanted[1], artist: wanted[2],
+                                albumArtist: wanted[3], genre: wanted[4])
     }
 
-    /// Total width of the flexible columns, for the resize cursor maths.
-    var flexibleTotal: CGFloat { title + album + artist + albumArtist + genre }
+    /// Width as painted. A divider drag starts from this, not from a stored
+    /// value that a narrow window may already have squeezed.
+    func width(of key: String) -> CGFloat {
+        switch key {
+        case Self.keyTitle: return title
+        case Self.keyAlbum: return album
+        case Self.keyArtist: return artist
+        case Self.keyAlbumArtist: return albumArtist
+        default: return genre
+        }
+    }
+
+    /// What the other user columns take, i.e. the room a divider drag must not
+    /// touch while genre keeps at least its minimum.
+    func otherUserWidths(excluding key: String) -> CGFloat {
+        Self.resizableKeys.filter { $0 != key }.reduce(0) { $0 + width(of: $1) }
+    }
+
+    /// Space the five text columns share. `resolved` always makes the widths add
+    /// up to the table's width, so this is exact rather than an estimate.
+    var available: CGFloat { max(0, title + album + artist + albumArtist + genre) }
+
+    /// One number per column, so the AppKit container can repaint the visible
+    /// rows when a divider moves instead of reloading the whole table.
+    var signature: String {
+        [title, album, artist, albumArtist, genre]
+            .map { String(Int($0.rounded())) }
+            .joined(separator: ",")
+    }
+}
+
+/// Everything the rows paint from, in one string. `SongTable` computes it once
+/// and the AppKit container compares it to decide whether the visible rows need
+/// repainting. A column drag, a selection change and a palette change all land
+/// here; a volume drag (which publishes 60 times a second) does not.
+@MainActor
+func songTableRenderToken(columns: SongTableColumns, store: LibraryStore,
+                          palette: Palette, cursor: PlaybackCursor) -> String {
+    var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
+    token += "|\(cursor.trackID?.uuidString ?? "")"
+    token += "|\(store.selectedTrackID?.uuidString ?? "")"
+    token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
+    token += "|columns(\(columns.signature))"
+    return token
 }
 
 // MARK: - Table
@@ -120,16 +156,6 @@ struct SongTable: View {
 
     @EnvironmentObject private var store: LibraryStore
 
-    /// See `SongTableAppKit.renderToken`. Kept here so both containers agree on
-    /// what counts as "the rows changed".
-    private func renderToken(columns: SongTableColumns, cursor: PlaybackCursor) -> String {
-        var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
-        token += "|\(cursor.trackID?.uuidString ?? "")"
-        token += "|\(store.selectedTrackID?.uuidString ?? "")"
-        token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
-        return token
-    }
-
     var body: some View {
         let rows = store.rows
 
@@ -160,7 +186,8 @@ struct SongTable: View {
                         palette: palette,
                         scrollTarget: store.scrollTarget,
                         derivedRebuilds: store.derivedRebuilds,
-                        renderToken: renderToken(columns: columns, cursor: cursor),
+                        renderToken: songTableRenderToken(columns: columns, store: store,
+                                                          palette: palette, cursor: cursor),
                         revealToken: store.revealToken,
                         store: store,
                         actions: actions,
@@ -213,17 +240,6 @@ private struct SongTableHeader: View {
     let columns: SongTableColumns
 
     @EnvironmentObject private var store: LibraryStore
-    @EnvironmentObject private var appearance: AppearanceSettings
-
-    /// See `SongTableAppKit.renderToken`. Kept here so both containers agree on
-    /// what counts as "the rows changed".
-    private func renderToken(columns: SongTableColumns, cursor: PlaybackCursor) -> String {
-        var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
-        token += "|\(cursor.trackID?.uuidString ?? "")"
-        token += "|\(store.selectedTrackID?.uuidString ?? "")"
-        token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
-        return token
-    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -231,48 +247,35 @@ private struct SongTableHeader: View {
                 .frame(width: columns.check)
 
             headerCell("状态", width: columns.status, column: nil)
-            columnResizer(SongTableColumns.keyTitle) {
+            column(SongTableColumns.keyTitle) {
                 TitleHeaderCell(columns: columns)
             }
-            columnResizer(SongTableColumns.keyAlbum) {
+            column(SongTableColumns.keyAlbum) {
                 headerCell("专辑", width: columns.album, column: .album)
             }
-            columnResizer(SongTableColumns.keyArtist) {
+            column(SongTableColumns.keyArtist) {
                 headerCell("艺术家", width: columns.artist, column: .artist)
             }
-            columnResizer(SongTableColumns.keyAlbumArtist) {
+            column(SongTableColumns.keyAlbumArtist) {
                 headerCell("专辑艺术家", width: columns.albumArtist, column: .albumArtist)
             }
-            columnResizer(SongTableColumns.keyGenre) {
-                genreCell
-            }
+            genreCell
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(palette.columnHeader)
         .overlay(alignment: .bottom) { Hairline() }
     }
 
-    /// A column plus the 5pt grip on its trailing edge. Dragging the grip sets
-    /// that column's width; genre keeps taking the remainder, so the row never
-    /// leaves a gap on the right.
-    private func columnResizer<Content: View>(_ key: String,
-                                              @ViewBuilder content: () -> Content) -> some View {
+    /// A column plus the grip that drags its trailing divider. The grip's grab
+    /// area is the last 9pt of the column itself: half of a centred grip would
+    /// sit over the next header, which is drawn later and would eat those clicks.
+    /// The line it draws stays on the divider, where the hairline already is.
+    private func column<Content: View>(_ key: String,
+                                      @ViewBuilder content: () -> Content) -> some View {
         content()
             .overlay(alignment: .trailing) {
-                ColumnResizer(key: key, current: width(for: key))
-                    .offset(x: 3)
+                ColumnResizer(key: key, columns: columns)
             }
-    }
-
-    private func width(for key: String) -> Double {
-        if let stored = appearance.columnWidths[key] { return stored }
-        switch key {
-        case SongTableColumns.keyTitle: return Double(columns.title)
-        case SongTableColumns.keyAlbum: return Double(columns.album)
-        case SongTableColumns.keyArtist: return Double(columns.artist)
-        case SongTableColumns.keyAlbumArtist: return Double(columns.albumArtist)
-        default: return Double(columns.genre)
-        }
     }
 
     private func headerCell(_ title: String, width: CGFloat, column: SortColumn?) -> some View {
@@ -304,19 +307,8 @@ private struct SongTableHeader: View {
 
     /// "#" and "标题" are two sort targets inside one column.
     private struct TitleHeaderCell: View {
-    @Environment(\.palette) private var palette
         let columns: SongTableColumns
         @EnvironmentObject private var store: LibraryStore
-
-    /// See `SongTableAppKit.renderToken`. Kept here so both containers agree on
-    /// what counts as "the rows changed".
-    private func renderToken(columns: SongTableColumns, cursor: PlaybackCursor) -> String {
-        var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
-        token += "|\(cursor.trackID?.uuidString ?? "")"
-        token += "|\(store.selectedTrackID?.uuidString ?? "")"
-        token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
-        return token
-    }
 
         var body: some View {
             HStack(spacing: 0) {
@@ -417,15 +409,6 @@ struct SongTableAlbumRow: View {
 
     @EnvironmentObject private var store: LibraryStore
 
-    /// See `SongTableAppKit.renderToken`. Kept here so both containers agree on
-    /// what counts as "the rows changed".
-    private func renderToken(columns: SongTableColumns, cursor: PlaybackCursor) -> String {
-        var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
-        token += "|\(cursor.trackID?.uuidString ?? "")"
-        token += "|\(store.selectedTrackID?.uuidString ?? "")"
-        token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
-        return token
-    }
     /// Owned by this row: a decoded cover updates one header, not the table.
     @State private var thumb: NSImage?
     /// Which album the cached thumbnail belongs to; states survive cell reuse.
@@ -479,12 +462,9 @@ struct SongTableAlbumRow: View {
         }
         .background(palette.albumHeaderBG)
         .overlay(alignment: .bottom) { Hairline() }
-        .contentShape(Rectangle())
-        .onTapGesture { store.openGroup(group) }
-        .help("在播放列表中查看《\(group.album)》")
-        .onHover { hovering in
-            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-        }
+        // The band used to be a "drill into this album" button that filtered the
+        // library and jumped to the playlist view. Clicking a row of the table
+        // should not rewrite the search box, so it is inert now.
     }
 
     /// The reference album header band measures 69.5pt tall: the 62pt cover plus
@@ -531,15 +511,6 @@ struct SongTableTrackRow: View {
 
     @EnvironmentObject private var store: LibraryStore
 
-    /// See `SongTableAppKit.renderToken`. Kept here so both containers agree on
-    /// what counts as "the rows changed".
-    private func renderToken(columns: SongTableColumns, cursor: PlaybackCursor) -> String {
-        var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
-        token += "|\(cursor.trackID?.uuidString ?? "")"
-        token += "|\(store.selectedTrackID?.uuidString ?? "")"
-        token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
-        return token
-    }
     @EnvironmentObject private var cursor: PlaybackCursor
 
     /// Actions arrive as closures so the row never observes `PlayerEngine`; that
@@ -680,16 +651,6 @@ private struct SongTableEmptyState: View {
 @Environment(\.palette) private var palette
     @EnvironmentObject private var store: LibraryStore
 
-    /// See `SongTableAppKit.renderToken`. Kept here so both containers agree on
-    /// what counts as "the rows changed".
-    private func renderToken(columns: SongTableColumns, cursor: PlaybackCursor) -> String {
-        var token = "\(store.derivedRebuilds)|\(palette.token)|\(cursor.isPlaying)"
-        token += "|\(cursor.trackID?.uuidString ?? "")"
-        token += "|\(store.selectedTrackID?.uuidString ?? "")"
-        token += "|\(Int(store.rowHeight))|\(Int(columns.check + columns.status))"
-        return token
-    }
-
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: "waveform")
@@ -738,40 +699,101 @@ private struct SongTableEmptyState: View {
 
 // MARK: - Row factory
 
-/// The 5pt-wide grip between two column headers.
+/// The 9pt grab area on the trailing edge of a column header.
+///
+/// It sits *inside* the column rather than centred on the divider: an `overlay`
+/// that spills into the next header loses those pixels to the later-drawn
+/// sibling, which would leave half of the grip dead. The 1pt highlight is drawn
+/// on the trailing edge, so it still lights up the divider itself.
 struct ColumnResizer: View {
+    static let width: CGFloat = 9
+
     let key: String
-    let current: Double
+    /// The layout on screen, so a drag begins where the divider is drawn.
+    let columns: SongTableColumns
 
     @EnvironmentObject private var appearance: AppearanceSettings
-    @State private var start: Double?
+    /// Frozen when the drag starts: this column's painted width plus the room the
+    /// other user columns take. Kept constant so the pointer and the divider move
+    /// together for the whole gesture.
+    @State private var drag: (base: Double, others: Double)?
     @State private var hovering = false
+    @State private var cursorPushed = false
+
+    private var minimum: Double { SongTableColumns.minimums[key] ?? 0 }
+
+    /// Widest this column may get without pushing the row past the table or
+    /// squeezing genre below its minimum.
+    private var maximum: Double {
+        let others = drag?.others ?? columns.otherUserWidths(excluding: key)
+        let genreMinimum = SongTableColumns.minimums[SongTableColumns.keyGenre] ?? 0
+        return max(minimum, Double(columns.available) - others - genreMinimum)
+    }
 
     var body: some View {
         Rectangle()
             .fill(Theme.textSecondary.opacity(hovering ? 0.45 : 0))
-            .frame(width: hovering ? 2 : 1)
-            .frame(width: 9)
+            .frame(width: 1)
+            .frame(width: Self.width, alignment: .trailing)
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
             .onHover { inside in
                 hovering = inside
-                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                if inside { pushCursor() } else { popCursor() }
             }
             .gesture(
-                DragGesture(minimumDistance: 0)
+                // `.global`: the divider itself moves while the drag is running,
+                // so a local coordinate space would keep re-basing on that
+                // movement and the grip would stop tracking the pointer.
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        let base = start ?? current
-                        if start == nil { start = base }
-                        appearance.setColumnWidth(base + value.translation.width, for: key)
-                        NSCursor.resizeLeftRight.push()
+                        let state: (base: Double, others: Double)
+                        if let drag {
+                            state = drag
+                        } else {
+                            state = (Double(columns.width(of: key)),
+                                     Double(columns.otherUserWidths(excluding: key)))
+                            drag = state
+                            // Pin the other columns to what is on screen. Without
+                            // this a narrow window would make the first pixel of
+                            // the drag jump every column at once.
+                            appearance.materialize(columns)
+                        }
+                        let target = min(maximum, max(minimum, state.base + value.translation.width))
+                        appearance.setColumnWidth(target, for: key)
+                        NSCursor.resizeLeftRight.set()
                     }
                     .onEnded { _ in
-                        start = nil
-                        NSCursor.pop()
+                        drag = nil
+                        appearance.commitLayout()
+                        if hovering { pushCursor() } else { popCursor() }
                     }
             )
-            .help("拖动调整这一栏的宽度")
+            .help("拖动调整「\(name)」的宽度")
+    }
+
+    private var name: String {
+        switch key {
+        case SongTableColumns.keyTitle: return "标题"
+        case SongTableColumns.keyAlbum: return "专辑"
+        case SongTableColumns.keyArtist: return "艺术家"
+        case SongTableColumns.keyAlbumArtist: return "专辑艺术家"
+        default: return "流派"
+        }
+    }
+
+    /// Balanced push/pop: during a drag the pointer can leave the 9pt strip, and
+    /// an unpaired `pop` would end up discarding someone else's cursor.
+    private func pushCursor() {
+        guard !cursorPushed else { return }
+        NSCursor.resizeLeftRight.push()
+        cursorPushed = true
+    }
+
+    private func popCursor() {
+        guard cursorPushed else { return }
+        NSCursor.pop()
+        cursorPushed = false
     }
 }
 

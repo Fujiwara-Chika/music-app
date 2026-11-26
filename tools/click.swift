@@ -35,6 +35,10 @@ if let dragIndex = args.firstIndex(of: "--drag"), args.count > dragIndex + 1 {
     for i in 1...steps {
         let p = CGPoint(x: point.x + parts[0] * Double(i) / Double(steps),
                         y: point.y + parts[1] * Double(i) / Double(steps))
+        // A drag event does not move the hardware cursor, and SwiftUI reads the real
+        // pointer position: warp it first, otherwise the drag looks frozen at the
+        // press point (translation stays at one event's delta for the whole run).
+        CGWarpMouseCursorPosition(p)
         if let move = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged,
                               mouseCursorPosition: p, mouseButton: .left) {
             // SwiftUI gestures read the per-event delta, not just the position.

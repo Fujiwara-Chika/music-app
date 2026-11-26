@@ -132,7 +132,7 @@ enum SelfTest {
             && okModes && okPalette && okRestore && okSpectrum && okDerived && okRescan && okReveal && okDiscLabels
             && okIncremental && okUpgrade && okUpgradeScan
             && okPlaylists && okRowIDs && okPaletteAsync && okPlaylistRoundTrip && okEmptyScan
-            && okOrdering
+            && okOrdering && okColumns && okStableIDs
         print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), columns=\(okColumns), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), reveal=\(okReveal), disclabels=\(okDiscLabels))")
         exit(ok ? 0 : 1)
     }
@@ -393,8 +393,56 @@ enum SelfTest {
         let titleMin = CGFloat(SongTableColumns.minimums[SongTableColumns.keyTitle] ?? 0)
         let squeezedOk = squeezed.genre >= genreMin && squeezed.title >= titleMin
 
-        print("selftest: column layout — fits=\(fits), override=\(respected), sum=\(draggedFits), squeeze=\(squeezedOk)")
-        return fits && respected && draggedFits && squeezedOk
+        // Sweep the widths the window can actually produce. Two invariants have
+        // to hold for every combination: the row ends exactly at the table's
+        // edge, and once the table is wide enough for the minimums no column may
+        // dip below one. The old code clamped each column with its own `max`,
+        // whose sum could exceed the room left after the wider ones.
+        let floorTotal = CGFloat(SongTableColumns.minimums.values.reduce(0, +))
+        let overrideSets: [[String: Double]] = [
+            [:],
+            [SongTableColumns.keyTitle: 400, SongTableColumns.keyAlbum: 300],
+            [SongTableColumns.keyArtist: 70],
+            [SongTableColumns.keyAlbum: 500, SongTableColumns.keyAlbumArtist: 240]
+        ]
+        var sweepOK = true
+        for step in 0...40 {
+            let width = 400 + CGFloat(step) * 30
+            for overrides in overrideSets {
+                let c = SongTableColumns.resolved(for: width, overrides: overrides)
+                let available = max(0, width - c.check - c.status)
+                let total = c.title + c.album + c.artist + c.albumArtist + c.genre
+                if abs(total - available) > 0.51 { sweepOK = false }
+                guard available >= floorTotal else { continue }
+                for key in SongTableColumns.resizableKeys {
+                    if c.width(of: key) < CGFloat(SongTableColumns.minimums[key] ?? 0) - 0.01 {
+                        sweepOK = false
+                    }
+                }
+                if c.genre < genreMin - 0.01 { sweepOK = false }
+            }
+        }
+
+        // Window width: the panes are fixed, so the table simply gets whatever is
+        // left — including the case where that is narrower than every column
+        // minimum added together (the centre must still end at the table's edge
+        // instead of spilling past it).
+        let windowMinimum = Metrics.sidebarWidth + Metrics.panelWidth
+        var windowOK = true
+        for step in 0...40 {
+            let window = windowMinimum + 40 + CGFloat(step) * 20
+            let table = window - Metrics.sidebarWidth - Metrics.panelWidth
+            let c = SongTableColumns.resolved(for: table)
+            let available = max(0, table - c.check - c.status)
+            let total = c.title + c.album + c.artist + c.albumArtist + c.genre
+            if abs(total - available) > 0.51 { windowOK = false }
+            if c.title < 0 || c.album < 0 || c.artist < 0 || c.albumArtist < 0 || c.genre < 0 {
+                windowOK = false
+            }
+        }
+
+        print("selftest: column layout — fits=\(fits), override=\(respected), sum=\(draggedFits), squeeze=\(squeezedOk), sweep=\(sweepOK), window=\(windowOK)")
+        return fits && respected && draggedFits && squeezedOk && sweepOK && windowOK
     }
 
     private static func checkSnapshotUpgradeEndToEnd() -> Bool {

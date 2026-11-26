@@ -84,8 +84,11 @@ struct SongTableAppKit: NSViewRepresentable {
         private var parent: SongTableAppKit
         weak var table: NSTableView?
 
-        /// Cheap signature of "what is on screen", so a palette or selection change
-        /// does not reload the whole table.
+        /// Cheap signature of "what rows exist on screen", so a palette, selection
+        /// or column-width change does not reload the whole table. Column widths
+        /// travel in `renderToken` instead: they only need the visible rows
+        /// repainted, and a full `reloadData` on every drag frame is what made
+        /// resizing feel like it was fighting the pointer.
         private var layoutSignature = ""
 
         init(_ parent: SongTableAppKit) {
@@ -97,7 +100,7 @@ struct SongTableAppKit: NSViewRepresentable {
             guard let table else { return }
             table.rowHeight = next.rowHeight
 
-            let signature = "\(next.derivedRebuilds)|\(next.rows.count)|\(next.rows.first?.id ?? "")|\(next.rows.last?.id ?? "")|\(next.rowHeight)|\(next.albumHeight)|\(Int(next.columns.check + next.columns.status))|" + Self.columnSignature(next.columns)
+            let signature = "\(next.derivedRebuilds)|\(next.rows.count)|\(next.rows.first?.id ?? "")|\(next.rows.last?.id ?? "")|\(next.rowHeight)|\(next.albumHeight)"
             let needsReload = signature != layoutSignature
             layoutSignature = signature
             if needsReload {
@@ -114,13 +117,6 @@ struct SongTableAppKit: NSViewRepresentable {
                 renderToken = next.renderToken
             }
             revealTargetIfNeeded()
-        }
-
-        /// One number per column, so a dragged column width reloads the rows.
-        static func columnSignature(_ columns: SongTableColumns) -> String {
-            [columns.title, columns.album, columns.artist, columns.albumArtist, columns.genre]
-                .map { String(Int($0.rounded())) }
-                .joined(separator: ",")
         }
 
         private var renderToken = ""

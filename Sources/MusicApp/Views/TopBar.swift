@@ -62,7 +62,15 @@ struct TopBar: View {
                     .accessibilityLabel("正在扫描资料库")
             }
 
-            Spacer(minLength: 12)
+            // Blank strip: the window's only drag handle (see WindowDragHandle).
+            // `ImageRenderer` cannot draw an AppKit view — it would come out as a
+            // yellow placeholder — and an offscreen render has no window to drag.
+            if RenderMode.isOffscreen {
+                Spacer(minLength: 12)
+            } else {
+                WindowDragHandle()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
 
             HStack(spacing: L.itemSpacing) {
                 toolbarButton("locate", symbol: "music.note", help: "定位到当前播放",

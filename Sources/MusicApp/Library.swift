@@ -805,17 +805,6 @@ final class LibraryStore: ObservableObject {
         return nil
     }
 
-    /// Header click: show that album / artist / genre in the playlist view.
-    func openGroup(_ group: AlbumGroup) {
-        // Every view mode drills in the same way: filter to the group's name and
-        // show it in the playlist layout.
-        filterText = group.album
-        viewMode = .playlist
-        selectedSection = .library
-        selectedTrackID = group.tracks.first?.id
-        scrollTarget = nil
-    }
-
     /// Number of albums with artwork (used by the headless self test).
     var artworkCount: Int = 0
 
