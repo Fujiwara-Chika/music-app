@@ -163,10 +163,20 @@ enum SelfTest {
         let okScroll = checkTableScrollRestore()
         let okOpacityToken = checkOpacityRenderToken()
         let okScratch = checkScratchSession()
-        let okUserData = userDefaults.data(forKey: PlaybackMemory.storageKey) == userSnapshot
-            && userDefaults.object(forKey: PlayerEngine.volumeKey) as? Double == userVolume
-            && userDefaults.object(forKey: PlayMode.storageKey) as? Int == userMode
-            && userDefaults.string(forKey: LibraryStore.folderKey) == userFolder
+        let nowSnapshot = userDefaults.data(forKey: PlaybackMemory.storageKey)
+        // Compare numbers as numbers: `object(forKey:)` hands back an `NSNumber`
+        // whose bridging to `Double` depends on how the plist encoded it (a
+        // `defaults write -float` and the app's own `set(Double)` disagree), so
+        // the old `as? Double` comparison failed at random.
+        let sameSnapshot = nowSnapshot == userSnapshot
+        let sameVolume = (userDefaults.object(forKey: PlayerEngine.volumeKey) as? NSNumber)?.doubleValue
+            == userVolume.map { NSNumber(value: $0).doubleValue }
+        let sameMode = userDefaults.object(forKey: PlayMode.storageKey) as? Int == userMode
+        let sameFolder = userDefaults.string(forKey: LibraryStore.folderKey) == userFolder
+        NSLog("selftest: user domain untouched — snapshot=%@ volume=%@ mode=%@ folder=%@",
+              String(sameSnapshot), String(sameVolume), String(sameMode), String(sameFolder))
+        let okUserData = sameSnapshot && sameVolume && sameMode && sameFolder
+
         let ok = okPlayback && okPause && okOrder && okSort && okCache && okGroups
             && okModes && okPalette && okRestore && okSpectrum && okSpectrumBlock && okDerived && okRescan && okReveal && okDiscLabels
             && okIncremental && okUpgrade && okUpgradeScan
@@ -1370,9 +1380,19 @@ enum SelfTest {
     /// Closing the app must leave a usable snapshot behind; the user's real
     /// snapshot is put back afterwards.
     private static func checkPlaybackMemory() -> Bool {
-        let original = PlaybackMemory.load()
+        // Round-trip in a throwaway suite. This used to write a sample into the
+        // user's real snapshot and put it back afterwards: the restore re-encoded
+        // the JSON, which reorders keys, so the `userdata` check below saw the
+        // bytes change even though the content was identical — and a crash
+        // midway would have left the sample behind for real.
+        let suite = "local.aria.music.selftest.playback.\(UUID().uuidString)"
+        guard let scratch = UserDefaults(suiteName: suite) else { return false }
+        scratch.removePersistentDomain(forName: suite)
+        let savedStore = PlaybackMemory.store
+        PlaybackMemory.store = scratch
         defer {
-            if let original { PlaybackMemory.save(original) } else { PlaybackMemory.clear() }
+            PlaybackMemory.store = savedStore
+            scratch.removePersistentDomain(forName: suite)
         }
 
         let sample = PlaybackSnapshot(filePath: "/tmp/self-test.m4a", album: "Self Test",

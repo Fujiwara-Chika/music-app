@@ -9,6 +9,9 @@ struct WindowBackdrop: View {
     let palette: Palette
     let artwork: NSImage?
     let blur: Double
+    /// How opaque the surfaces above are. The more of the cover shows through,
+    /// the more it has to be darkened, or text over a bright sleeve loses contrast.
+    let opacity: Double
 
     var body: some View {
         ZStack {
@@ -18,7 +21,7 @@ struct WindowBackdrop: View {
                     .aspectRatio(contentMode: .fill)
                     .blur(radius: blur, opaque: true)
                     .saturation(1.25)
-                    .overlay(Color.black.opacity(0.22))
+                    .overlay(Color.black.opacity(0.22 + (1 - opacity) * 0.45))
                     .clipped()
             } else {
                 LinearGradient(

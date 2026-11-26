@@ -182,7 +182,6 @@ struct SongTable: View {
                     VStack(spacing: 0) { rowViews(rows, columns) }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .clipped()
-                        .background(palette.windowBG)
                 } else if AppKitTableSettings.isEnabled {
                     SongTableAppKit(
                         rows: rows,
@@ -203,7 +202,6 @@ struct SongTable: View {
                         ticker: store.artworkTicker
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(palette.windowBG)
                     .onAppear {
                         store.prefetchThumbnails(maxPixel: SongTableAlbumRow.thumbPixels)
                     }
@@ -217,7 +215,6 @@ struct SongTable: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(palette.windowBG)
                         .onAppear {
                             store.prefetchThumbnails(maxPixel: SongTableAlbumRow.thumbPixels)
                         }
@@ -648,7 +645,11 @@ struct SongTableTrackRow: View {
     private var rowBackground: Color {
         if isSelected { return palette.selection }
         if isHovering { return palette.controlBG.opacity(0.28) }
-        return palette.rowBG
+        // The table already paints `windowBG`, and `rowBG` is one step off it, so
+        // a per-row fill was invisible at full opacity and only stacked a second
+        // translucent layer — which made the table read as opaque while the
+        // sidebar faded. Leave the row clear and let the table's fill show.
+        return .clear
     }
 }
 

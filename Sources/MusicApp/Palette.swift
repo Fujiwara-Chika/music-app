@@ -53,8 +53,14 @@ struct Palette: Equatable {
         var p = self
         p.windowBG = windowBG.opacity(soft)
         p.rowBG = rowBG.opacity(soft)
-        p.columnHeader = columnHeader.opacity(soft)
-        p.albumHeaderBG = albumHeaderBG.opacity(soft)
+        // Bands sit *on top of* a pane's own translucent fill, so their alpha
+        // stacks: 0.55 under 0.55 is 0.80, which reads as "this strip stayed
+        // opaque". Fade them much faster than the base (opacity^6 is 1 at full
+        // opacity, so the reference look is untouched, and near 0 at 45%) — the
+        // band then tints the base instead of hiding the backdrop.
+        let band = pow(opacity, 6)
+        p.columnHeader = columnHeader.opacity(band)
+        p.albumHeaderBG = albumHeaderBG.opacity(band)
         p.panelBG = panelBG.opacity(soft)
         p.transportBG = transportBG.opacity(soft)
         p.controlBG = controlBG.opacity(soft)

@@ -186,7 +186,8 @@ struct RootView: View {
             WindowBackdrop(
                 palette: shown,
                 artwork: appearance.usesArtworkBackdrop ? backdropArtwork : nil,
-                blur: appearance.backgroundBlur
+                blur: appearance.backgroundBlur,
+                opacity: appearance.backgroundOpacity
             )
         }
         .ignoresSafeArea(.container, edges: .top)

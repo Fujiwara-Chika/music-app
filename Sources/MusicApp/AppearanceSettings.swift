@@ -25,12 +25,14 @@ final class AppearanceSettings: ObservableObject {
     /// opacity, so the default keeps the reference look.
     @Published var backgroundOpacity: Double {
         didSet {
+            guard !isApplyingOverride else { return }
             defaults.set(backgroundOpacity, forKey: Key.opacity)
         }
     }
 
     @Published var backgroundBlur: Double {
         didSet {
+            guard !isApplyingOverride else { return }
             defaults.set(backgroundBlur, forKey: Key.blur)
         }
     }
@@ -98,10 +100,16 @@ final class AppearanceSettings: ObservableObject {
         columnWidths = defaults.object(forKey: Key.columns) as? [String: Double] ?? [:]
     }
 
+    /// True while `applyLaunchOverrides` runs: an override is for this launch
+    /// only, so it must not be written back over the user's saved look.
+    private var isApplyingOverride = false
+
     /// Launch overrides, so screenshots of a given setting are reproducible:
     /// `--opacity 0.8 --blur 50 --column-widths title=190,album=160`.
     func applyLaunchOverrides() {
         let arguments = CommandLine.arguments
+        isApplyingOverride = true
+        defer { isApplyingOverride = false }
         if let index = arguments.firstIndex(of: "--opacity"), index + 1 < arguments.count,
            let value = Double(arguments[index + 1]) {
             backgroundOpacity = Self.clamp(value, to: Self.opacityRange)
