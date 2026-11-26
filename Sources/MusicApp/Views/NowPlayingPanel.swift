@@ -17,7 +17,7 @@ struct NowPlayingPanel: View {
 
     private enum Layout {
         static let horizontalPadding: CGFloat = 4
-        static let topPadding: CGFloat = 23
+        static let topPadding: CGFloat = 6       // the cover sits right under the toolbar row
         static let coverHeight: CGFloat = 212      // reference: 251 x 212, not square
         static let coverGap: CGFloat = 27          // cover bottom -> rating row
         static let ratingGap: CGFloat = 6          // rating row -> title
