@@ -16,6 +16,9 @@ struct MusicAppMain: App {
         if CommandLine.arguments.contains("--notify-test") {
             NowPlayingNotifier.runDiagnostics()
         }
+        if CommandLine.arguments.contains("--notify-count") {
+            NowPlayingNotifier.printDelivered()
+        }
     }
 
     var body: some Scene {

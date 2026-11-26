@@ -16,10 +16,11 @@ import UserNotifications
 ///   is that delegate, installed from the app delegate.
 @MainActor
 final class NowPlayingNotifier {
-    /// Requests are identified per track: re-adding one with an identifier that is
-    /// already delivered is treated as an *update*, and macOS then presents nothing
-    /// in the foreground. The previous one is removed so Centre keeps a single card.
-    private var lastRequestID: String?
+    /// Notification Centre keeps exactly one card: the track that is playing now.
+    /// A fixed identifier replaces the previous card, and clearing the delivered
+    /// ones first also drops whatever an earlier launch (or a crash mid-post) left
+    /// behind — this app posts nothing else, so clearing all of them is safe.
+    static let requestIdentifier = "now-playing"
 
     /// `false` for a bare SwiftPM binary; see the note above.
     static var isAvailable: Bool { Bundle.main.bundleIdentifier != nil }
@@ -105,13 +106,11 @@ final class NowPlayingNotifier {
     private func post(_ track: Track) {
         guard isEnabled(), player.isPlaying else { return }
         let content = Self.content(for: track, artwork: artwork(track))
-        let requestID = "now-playing.\(track.id.uuidString)"
-        let request = UNNotificationRequest(identifier: requestID, content: content, trigger: nil)
+        let request = UNNotificationRequest(identifier: Self.requestIdentifier,
+                                           content: content,
+                                           trigger: nil)
         let centre = UNUserNotificationCenter.current()
-        if let lastRequestID {
-            centre.removeDeliveredNotifications(withIdentifiers: [lastRequestID])
-        }
-        lastRequestID = requestID
+        centre.removeAllDeliveredNotifications()
         centre.add(request) { error in
             if let error {
                 NSLog("音乐: notification failed – \(error.localizedDescription)")
@@ -235,6 +234,20 @@ final class NowPlayingNotifier {
 }
 
 extension NowPlayingNotifier {
+    /// `--notify-count`: prints what is sitting in Notification Centre and exits.
+    /// Used to prove that skipping through tracks leaves a single card.
+    static func printDelivered() -> Never {
+        guard isAvailable else {
+            print("notify: no bundle id; nothing is delivered")
+            exit(1)
+        }
+        UNUserNotificationCenter.current().getDeliveredNotifications { delivered in
+            print("notify: delivered=\(delivered.count) titles=\(delivered.map(\.request.content.title))")
+            exit(0)
+        }
+        dispatchMain()
+    }
+
     /// `--notify-test`: asks the system what it thinks of us and posts one banner.
     /// Used to tell "our request was rejected" apart from "our request was never
     /// made" while the feature is being wired up.
@@ -249,10 +262,27 @@ extension NowPlayingNotifier {
             let content = UNMutableNotificationContent()
             content.title = "通知自检"
             content.subtitle = "歌手 — 专辑"
-            let request = UNNotificationRequest(identifier: "notify-self-check", content: content, trigger: nil)
+            let request = UNNotificationRequest(identifier: Self.requestIdentifier,
+                                                content: content,
+                                                trigger: nil)
+            centre.removeAllDeliveredNotifications()
             centre.add(request) { error in
                 print("notify: add \(error == nil ? "ok" : "failed – \(error!.localizedDescription)")")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { exit(0) }
+                // A second post must replace the first, leaving one card.
+                let second = UNMutableNotificationContent()
+                second.title = "通知自检 2"
+                second.subtitle = "只应留下这一条"
+                centre.removeAllDeliveredNotifications()
+                centre.add(UNNotificationRequest(identifier: Self.requestIdentifier,
+                                                 content: second,
+                                                 trigger: nil)) { _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        centre.getDeliveredNotifications { delivered in
+                            print("notify: delivered=\(delivered.count) titles=\(delivered.map(\.request.content.title))")
+                            exit(delivered.count == 1 ? 0 : 2)
+                        }
+                    }
+                }
             }
         }
         dispatchMain()

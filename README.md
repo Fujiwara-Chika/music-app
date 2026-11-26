@@ -124,8 +124,9 @@ open build/音乐.app
 - 第二行按**显示宽度**截断（CJK 字形按两格算，预算 44 格，超出补「…」）。按字符数算会让「ずっと真夜中でいいのに。 — 消えてしまいそうで」这种日文折成三行，横幅忽高忽低。
 - 封面取 160px 缩略图再写 PNG，不再把 768px 原图塞进通知附件。
 - 连按 ⌘→ 只弹最后一条（220ms 去抖）；启动时正在播的那首不弹，只有真正的切歌才弹。
+- **通知中心只保留最新一条**：固定 identifier `now-playing`，每次先 `removeAllDeliveredNotifications()` 再 `add`，所以既不会堆成一列历史，也能清掉上次启动留下的残留。
 - `⋯` 面板底部有「切歌时显示通知」开关（`appearance.notifyOnTrackChange`，默认开）。
-- 诊断：`open build/音乐.app --args --notify-test` 会打印 `authorization` / `alertStyle` / `add` 结果并真弹一条，用来区分「系统拒收」和「我们没发」。
+- 诊断：`open build/音乐.app --args --notify-test` 会打印 `authorization` / `alertStyle` / `add` 结果，连发两条后断言 `delivered=1`（只留最新那条），再加真弹一条，用来区分「系统拒收」和「我们没发」；`--notify-count` 只读，打印当前通知中心里有几条、标题是什么。
 
 ## 播放模式
 
