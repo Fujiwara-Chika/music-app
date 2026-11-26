@@ -20,7 +20,7 @@
 | 队列 | 播放列表（新建/添加曲目/删除）、跟随播放自动滚动、定位到当前播放 |
 | 显示 | 配色跟随封面、背景模糊与透明度滑块（各层表面半透明，背后是那张模糊封面）、真实频谱 |
 | 交互 | 星级评分、勾选、右键菜单、拖放窗口、空格播放/暂停、系统媒体键（F7/F8/F9）与 Control Center、菜单项（`⌘O` / `⌘R` / `⌘→` / `⇧⌘M`） |
-| 工程 | 29 项无窗口自检（`--self-test`）、资源包定位自检（`--resource-check`）、离屏渲染（`--render-ui` 等）、打包脚本与 DMG |
+| 工程 | 32 项无窗口自检（`--self-test`）、资源包定位自检（`--resource-check`）、离屏渲染（`--render-ui` 等）、打包脚本与 DMG |
 
 ## 还没做的
 
@@ -80,7 +80,7 @@ open build/音乐.app
 - **播放**：AVAudioPlayer 播放真实文件，示例曲目用模拟时钟；支持进度拖动、音量拖动、随机、循环（off / all / one）。
 - **播放历史 / 最常播放**：按播放次数自动排序，`notePlay` 在开始播放时累计。
 - **评分与勾选**：右侧面板点星修改评分，表格状态列可勾选曲目。
-- **无窗口自检**：`--self-test` 一次跑完扫描、封面、播放、暂停等 29 项检查（`UserDefaults` 也沙箱化：`PlaybackMemory.store` / `LibraryStore(defaults:)` / `PlayerEngine(defaults:)` 全部指向一次性的 suite，第 28 项 `userdata` 断言跑完前后用户域**一个键都没变**（续播快照 / 音量 / 播放模式 / 导入文件夹路径）——之前用真实播放器跑 `stop()` 会把续播快照换成示例曲目；`--render-ui` / `--render-transport` 这类会 play + seek 的渲染工具同样走一次性 suite；第 27 项 `scratch` 钉住 `--autoplay` / `--scratch-session` 必须启用它，所以 `tools/shot.sh` 照常启动 App 也不会改你的续播点），终端里给出 PASS / FAIL；可以带一个文件夹参数（`--self-test /path/to/music`），默认用 `~/Music/Plex`，**该目录不存在时自动写一批 6 秒的合成 WAV 当测试夹具**，所以换台机器也能跑满。
+- **无窗口自检**：`--self-test` 一次跑完扫描、封面、播放、暂停等 32 项检查（`UserDefaults` 也沙箱化：`PlaybackMemory.store` / `LibraryStore(defaults:)` / `PlayerEngine(defaults:)` 全部指向一次性的 suite，第 28 项 `userdata` 断言跑完前后用户域**一个键都没变**（续播快照 / 音量 / 播放模式 / 导入文件夹路径）——之前用真实播放器跑 `stop()` 会把续播快照换成示例曲目；`--render-ui` / `--render-transport` 这类会 play + seek 的渲染工具同样走一次性 suite；第 27 项 `scratch` 钉住 `--autoplay` / `--scratch-session` 必须启用它，所以 `tools/shot.sh` 照常启动 App 也不会改你的续播点），终端里给出 PASS / FAIL；可以带一个文件夹参数（`--self-test /path/to/music`），默认用 `~/Music/Plex`，**该目录不存在时自动写一批 6 秒的合成 WAV 当测试夹具**，所以换台机器也能跑满。
 - **原生窗口外框**：用系统红绿灯、`Picker(.segmented)` 视图切换、标准下拉菜单与 SF Symbols 工具栏按钮，窗口标题栏透明、内容延伸到顶部；**拖动窗口只在顶栏中间那块空白处**（见下）。
 - **自绘矢量图标（仅底部播放控制）**：上一首 / 播放 / 下一首 / 停止 / 播放模式仍用 SwiftUI `Canvas` 按参考图手写路径绘制（`Views/SkinIcons.swift`，约 170 行），线宽随缩放保持恒定，配合参考图里 32pt 圆环、3px 轨道的规格。
 
@@ -121,12 +121,14 @@ open build/音乐.app
 切歌时用系统通知弹一张横幅，形状照 macOS 的「正在播放」卡片做：左边 App 图标（黑胶），第一行歌名，第二行 `歌手 — 专辑`，右边专辑封面缩略图。
 
 - 两行布局靠「只填 `title` 和 `subtitle`、`body` 留空」实现——`body` 会被渲染成第三行，参考图里没有那一行。
-- 第二行按**显示宽度**截断（CJK 字形按两格算，预算 44 格，超出补「…」）。按字符数算会让「ずっと真夜中でいいのに。 — 消えてしまいそうで」这种日文折成三行，横幅忽高忽低。
+- 第二行按**显示宽度**截断（CJK 字形按两格算，预算 28 格，超出补「…」）。预算从早先的 44 降到 28：`ASIAN KUNG-FU GENERATION — Wonder Future` 这种 40 格全 ASCII 的行按 44 格不截断，却仍会折成第三行；按字符数算又会把日文折三行，所以按显示宽度算并向窄的一端取。
 - 封面取 160px 缩略图再写 PNG，不再把 768px 原图塞进通知附件。
-- 连按 ⌘→ 只弹最后一条（220ms 去抖）；启动时正在播的那首不弹，只有真正的切歌才弹。
-- **通知中心只保留最新一条**：固定 identifier `now-playing`，每次先 `removeAllDeliveredNotifications()` 再 `add`，所以既不会堆成一列历史，也能清掉上次启动留下的残留。
+- 连按 ⌘→ 只弹最后一条（220ms 去抖）。恢复会话打开就停在暂停状态的「正在播放」那首不弹；空资料库启动后用户点的第一首会正常弹（是否播放由 `isPlaying` 判定，而不是「是不是启动后第一首」）。`--autoplay` 截图路径不出横幅。
+- **通知中心只保留最新一条**：每条通知用**独立** identifier（`now-playing.<序号>`），先按 identifier 删掉上一条再 `add` 新的。不用固定 identifier 是因为「同 id 再 add」会被系统当成 *update*、前台不弹横幅；独立 id 保证一定弹，而「只留一条」由删除上一条保证。启动时 `attach()` 一次性 `removeAllDeliveredNotifications()` 清掉上次残留。
 - `⋯` 面板底部有「切歌时显示通知」开关（`appearance.notifyOnTrackChange`，默认开）。
-- 诊断：`open build/音乐.app --args --notify-test` 会打印 `authorization` / `alertStyle` / `add` 结果，连发两条后断言 `delivered=1`（只留最新那条），再加真弹一条，用来区分「系统拒收」和「我们没发」；`--notify-count` 只读，打印当前通知中心里有几条、标题是什么。
+- 诊断：`open build/音乐.app --args --notify-test` 会打印 `authorization` / `alertStyle` / `add` 结果，用两个不同 id 连发两条（发第二条前按 id 删掉第一条）后断言 `delivered=1`（只留最新那条），用来区分「系统拒收」和「我们没发」；`--notify-count` 只读，打印当前通知中心里有几条、标题是什么。
+- 无窗口自检 `--self-test` 里的 `schedulenotify` 项直接驱动调度：用 `onAnnounce` 钩子替代真实投递，断言「恢复会话暂停态不弹」「空库首播会弹」「同曲重复不重弹」「快速切歌只弹最后一首」。
+- 验证陷阱：前台横幅**只在通过 LaunchServices 启动时出现**（`open build/音乐.app` 或双击）；直接跑 `build/音乐.app/Contents/MacOS/Music` 会调用委托的 `willPresent`，但系统不弹。排查「为什么没横幅」要先用 `open` 启动。
 
 ## 播放模式
 
@@ -177,6 +179,7 @@ open build/音乐.app
 - **音量默认 100%、上限 100%**：默认开满（和参考图一样旋钮贴在右端），滑杆拖到底就是 1.0，不会超过；你调过的值单独记在 `player.volume`，下次启动沿用。早期版本存过 0.72，用一个一次性迁移标记把它作废。
 - 恢复出来是**暂停**状态，不会一开窗就出声 —— 面板、进度条、右侧封面都停在上次的位置，按下播放键从那里继续。
 - 曲目靠 `Track.id` 不行：那个 UUID 每次启动都重生成，所以匹配用的是路径与元数据。
+- **列表滚动位置**：退出时的顶行及其在行内的偏移存在 `table.verticalScroll`（`{rowID, offsetInRow}`），下次启动回到那里而不是顶部。用行 id 而不是像素偏移，所以中间插入/删除行（重新扫描）也不会错位；行不在了就保持原位。窗口打开时的配色动画会让内容尺寸在头 0.45 秒内变化、把滚动偏移夹回去，所以定位会在动画结束后再补一次（期间不记录滚动）。
 - 用 `--autoplay` 启动（截图/自检用）时跳过恢复，免得两个来源抢播放器。
 
 ## 配色取自封面
@@ -323,6 +326,35 @@ sample $(pgrep -f "MacOS/Music") 4               # 4 秒采样，看 Main Thread
 | 优化后 | **28.4%** | **8.5%** | 12.0% |
 
 这不是 Instruments 的帧率数字，只是主线程时间去向的对比——但它说明这段时间里跑的应用代码少了大约四分之一。
+
+## 播放时的 CPU
+
+播放时曾经稳定占用 ~12%（`ps %cpu` 显示 20%+ 是**生命周期平均**，含启动扫描）。真正的成本在「每帧重画」：进度时钟每 1/15 秒发布一次，频谱分析器每秒 20 次往主线程送数据。用 `MUSIC_CACHE_DIR` 把缓存指到临时目录、`--import` 一个小目录后实测拆解：
+
+| 配置 | 平均 CPU |
+| --- | --- |
+| 原始（15 Hz 时钟 + 20 Hz 频谱，每帧 seek+decode） | ~12.0% |
+| 频谱改 12 Hz | ~9.6% → 7.2%（tick 15 / 12） |
+| 把时间条拆成独立子视图后 | ~7–8% |
+| 分析器改成块读取后 | **~6.5%** |
+| 窗口被遮挡/隐藏时 | 只保留播放与持久化，不再重画 |
+
+四件事：
+
+1. **`TransportBar` 不再观察 `clock`。** 原来它的 `body` 读 `player.elapsedText` / `progressFraction`，于是每一次 tick 都把整条底栏（按钮、播放模式菜单、带阴影的音量滑块）重建一遍。现在时间文本 + 进度条拆成 `TransportProgress` 单独重绘，只碰那两个视图。
+2. **频谱 20 → 12 Hz。** 20 Hz 实测多花 ~5%，12 Hz 约 2%，再降到 8 Hz 没有可测收益——LED 表就这么点像素，12 是视觉不变的临界点。
+3. **分析器块读取。** 原来每一帧都 `file.framePosition = playhead` 再读 2048 帧，AAC 每次 seek 都要重新解包。现在一次解码半秒（`AVAudioPCMBuffer` 复用），约 6 帧请求共用一块，只有跳转（拖进度/切歌/反向跳）才重新填窗。解码开销降约一个数量级，也和播放解码器争得少了。自检里有一条守着它：`spectrum block reuse — bands=[22,22,…] stable=true`（同一 440Hz 音调在各偏移处、包括一次反向跳转，都落在同一个 band）。
+4. **窗口被遮挡 / App 隐藏时不再重画。** `PlayerEngine.uiIsVisible` 由 `NSWindow.didChangeOcclusionStateNotification` 驱动；隐藏时 `tick` 仍然持久化播放位置，但跳过进度/频谱发布与 FFT。后台听歌就是这样用的。
+
+测量方法（不碰用户资料库）：
+
+```bash
+mkdir -p /tmp/mmusic /tmp/mcache && cp 某目录/*.m4a /tmp/mmusic/
+MUSIC_CACHE_DIR=/tmp/mcache ./build/音乐.app/Contents/MacOS/Music --import /tmp/mmusic --autoplay 30 &
+top -l 10 -s 1 -pid $(pgrep -f 'MacOS/Music --import') -stats pid,cpu
+```
+
+`MUSIC_CACHE_DIR` 是给这种测量/截图用的缓存目录重定向，正常使用不设即走 `~/Library/Application Support/local.aria.music`。
 
 ## 播放列表
 

@@ -218,7 +218,10 @@ struct RootView: View {
             keyboardRouter = router
 
             let notifier = NowPlayingNotifier(player: player, isEnabled: {
+                // `--autoplay` is the screenshot / smoke-test path: a banner would
+                // land in the capture, so it never posts there.
                 appearance.notifyOnTrackChange
+                    && !CommandLine.arguments.contains("--autoplay")
             }) { track in
                 // A thumbnail is plenty for a banner, and it keeps the temp file
                 // small enough that a track change costs nothing.
@@ -227,6 +230,20 @@ struct RootView: View {
             }
             notifier.attach()
             self.notifier = notifier
+
+            // Start the meter/clock paused-or-not in step with what is actually on
+            // screen; the notifications below keep it that way.
+            syncUIVisibility()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeOcclusionStateNotification)) { note in
+            guard let window = note.object as? NSWindow, window.canBecomeKey else { return }
+            player.setUIVisible(window.occlusionState.contains(.visible))
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didHideNotification)) { _ in
+            player.setUIVisible(false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didUnhideNotification)) { _ in
+            syncUIVisibility()
         }
         .onDisappear {
             // The window is going away; a rebuilt view tree must not leave an
@@ -257,12 +274,21 @@ struct RootView: View {
             // The library snapshot is debounced by 2s, so a playlist or rating
             // made just before ⌘Q would otherwise never reach the disk.
             store.flushSnapshot()
+            // The scroll position is debounced too; flush the last 400 ms of it.
+            store.flushTableScroll()
             // Otherwise the system keeps the media keys pointed at a dead app.
             mediaCenter?.clear()
         }
     }
 
     // MARK: - Session restore and cover-derived palette
+
+    /// Mirrors the main window's occlusion onto the player, so a hidden or fully
+    /// covered window stops redrawing the meter and transport.
+    private func syncUIVisibility() {
+        guard let window = NSApp.windows.first(where: { $0.canBecomeKey }) else { return }
+        player.setUIVisible(window.occlusionState.contains(.visible))
+    }
 
     /// Brings back the track and playhead the app was closed on. Skipped when a
     /// launch override (demo autoplay / explicit import) is driving the session.

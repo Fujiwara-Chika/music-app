@@ -70,6 +70,7 @@ struct SongTableAppKit: NSViewRepresentable {
         scroll.contentInsets = NSEdgeInsets()
 
         context.coordinator.table = table
+        context.coordinator.observeScroll(in: scroll)
         return scroll
     }
 
@@ -116,7 +117,85 @@ struct SongTableAppKit: NSViewRepresentable {
                                  columnIndexes: IndexSet(integer: 0))
                 renderToken = next.renderToken
             }
+            restoreScrollIfNeeded()
             revealTargetIfNeeded()
+        }
+
+        // MARK: Scroll position across launches
+
+        /// False while launch is still settling. The window's palette animation
+        /// resizes the content for ~0.45 s, which clamps the restored offset; saves
+        /// are held off until the position has been re-asserted at the end of it.
+        private var restoreSettled = false
+        private var restoreTargetY: CGFloat?
+        private var restoreRetries = 0
+
+        /// `NSClipView` posts this on every scroll — user flings, the wheel, and
+        /// our own programmatic scrolls. Each one updates the debounced save.
+        func observeScroll(in scroll: NSScrollView) {
+            scroll.contentView.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(scrollDidChange),
+                name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+        }
+
+        @objc private func scrollDidChange(_ note: Notification) {
+            captureScroll()
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+
+        private func captureScroll() {
+            guard restoreSettled else { return }
+            guard let table, let scroll = table.enclosingScrollView,
+                  !parent.rows.isEmpty else { return }
+            let originY = scroll.contentView.bounds.origin.y
+            var index = table.row(at: NSPoint(x: 0, y: originY))
+            if index < 0 { index = table.rows(in: table.visibleRect).location }
+            guard index >= 0, index < parent.rows.count else { return }
+            let rect = table.rect(ofRow: index)
+            parent.store.noteTableScroll(rowID: parent.rows[index].id,
+                                         offsetInRow: Double(max(0, originY - rect.minY)))
+        }
+
+        /// Restores the position saved on the last quit. Applied as soon as the
+        /// table is laid out, then re-asserted once the launch animation settles so
+        /// a transient viewport resize cannot leave it near the top.
+        private func restoreScrollIfNeeded() {
+            guard !restoreSettled, !parent.rows.isEmpty, let table else { return }
+            guard table.bounds.height > 1, table.numberOfRows > 0 else {
+                if restoreRetries < 30 {
+                    restoreRetries += 1
+                    DispatchQueue.main.async { [weak self] in self?.restoreScrollIfNeeded() }
+                }
+                return
+            }
+            if restoreTargetY == nil {
+                guard let snapshot = parent.store.consumeScrollRestore(),
+                      let index = parent.rows.firstIndex(where: { $0.id == snapshot.rowID }) else {
+                    restoreSettled = true
+                    return
+                }
+                table.layoutSubtreeIfNeeded()
+                let rect = table.rect(ofRow: index)
+                restoreTargetY = max(0, rect.minY + CGFloat(snapshot.offsetInRow))
+                // Re-assert at the end of `RootView`'s 0.45 s palette animation.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    guard let self else { return }
+                    self.applyRestoreTarget()
+                    self.restoreSettled = true
+                }
+            }
+            applyRestoreTarget()
+        }
+
+        private func applyRestoreTarget() {
+            guard let y = restoreTargetY, let table,
+                  let scroll = table.enclosingScrollView else { return }
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+            scroll.reflectScrolledClipView(scroll.contentView)
         }
 
         private var renderToken = ""
@@ -126,6 +205,9 @@ struct SongTableAppKit: NSViewRepresentable {
                   parent.revealToken != lastRevealedToken else { return }
             guard let index = parent.rows.firstIndex(where: { $0.id == target }) else { return }
             lastRevealedToken = parent.revealToken
+            // A deliberate reveal (play, "locate playing") outranks the launch restore.
+            restoreTargetY = nil
+            restoreSettled = true
             // `scrollRowToVisible` silently does nothing here (view-based rows,
             // custom heights), so scroll the clip view explicitly.
             table.layoutSubtreeIfNeeded()

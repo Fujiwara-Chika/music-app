@@ -36,7 +36,13 @@ final class SnapshotWriter {
     static let version = 2
 
     /// ~/Library/Application Support/local.aria.music
+    ///
+    /// `MUSIC_CACHE_DIR` redirects it so a benchmark or screenshot run can scan a
+    /// real folder without touching the user's library snapshot.
     static var defaultDirectory: URL {
+        if let override = ProcessInfo.processInfo.environment["MUSIC_CACHE_DIR"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
         return base.appendingPathComponent("local.aria.music", isDirectory: true)

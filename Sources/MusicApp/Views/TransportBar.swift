@@ -6,9 +6,9 @@ import SwiftUI
 /// `RootView` already draws the 1px `palette.separator` line above this view, so the
 /// bar itself only contributes its background.
 struct TransportBar: View {
-    /// The clock ticks 30×/s; binding to it here keeps that cost inside this bar
-    /// instead of redrawing the whole window.
-    @EnvironmentObject private var clock: ProgressClock
+    /// The clock ticks at 15 Hz; it is *not* observed here — the elapsed time and
+    /// seek rail live in `TransportProgress`, so a tick re-renders that strip
+    /// alone instead of every button, glyph and the volume slider beside it.
     /// `isPlaying` lives on the cursor: the clock stops while paused, so binding
     /// the button to `player` alone left the glyph stale after a pause.
     @EnvironmentObject private var cursor: PlaybackCursor
@@ -37,26 +37,7 @@ struct TransportBar: View {
             controls
                 .padding(.trailing, Layout.elapsedGap)
 
-            Text(player.elapsedText)
-                .font(Typo.time)
-                .foregroundStyle(Theme.text)
-                .fixedSize()
-                .padding(.trailing, Layout.sliderGap)
-
-            ThinSlider(
-                fraction: player.progressFraction,
-                fill: palette.sliderFill,
-                showGlow: true,
-                trackHeight: Layout.seekTrackHeight,
-                thumbSize: Layout.seekThumb,
-                glowInset: 5,
-                label: "播放进度",
-                onScrub: { fraction in
-                    guard player.duration > 0 else { return }
-                    player.seek(to: fraction * player.duration)
-                }
-            )
-            .frame(minWidth: 200, maxWidth: .infinity)
+            TransportProgress()
 
             rightCluster
                 .padding(.leading, Layout.trailingGap)
@@ -147,6 +128,41 @@ struct TransportBar: View {
 }
 
 // MARK: - Buttons
+
+/// Elapsed time and the seek rail. Kept apart from `TransportBar` on purpose: the
+/// clock publishes 15×/s while playing, and when this lived in the bar's body the
+/// whole strip — transport glyphs, play-mode menu, the shadowed volume thumb — was
+/// re-evaluated on every tick. Now a tick touches only these two views.
+private struct TransportProgress: View {
+    @EnvironmentObject private var clock: ProgressClock
+    @EnvironmentObject private var player: PlayerEngine
+    @Environment(\.palette) private var palette
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(PlayerEngine.clock(clock.progress))
+                .font(Typo.time)
+                .foregroundStyle(Theme.text)
+                .fixedSize()
+                .padding(.trailing, TransportBar.Layout.sliderGap)
+
+            ThinSlider(
+                fraction: player.progressFraction,
+                fill: palette.sliderFill,
+                showGlow: true,
+                trackHeight: TransportBar.Layout.seekTrackHeight,
+                thumbSize: TransportBar.Layout.seekThumb,
+                glowInset: 5,
+                label: "播放进度",
+                onScrub: { fraction in
+                    guard player.duration > 0 else { return }
+                    player.seek(to: fraction * player.duration)
+                }
+            )
+            .frame(minWidth: 200, maxWidth: .infinity)
+        }
+    }
+}
 
 /// A plain transport glyph button with a subtle hover brightening.
 private struct TransportIconButton: View {

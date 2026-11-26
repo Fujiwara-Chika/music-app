@@ -17,10 +17,14 @@ import UserNotifications
 @MainActor
 final class NowPlayingNotifier {
     /// Notification Centre keeps exactly one card: the track that is playing now.
-    /// A fixed identifier replaces the previous card, and clearing the delivered
-    /// ones first also drops whatever an earlier launch (or a crash mid-post) left
-    /// behind — this app posts nothing else, so clearing all of them is safe.
-    static let requestIdentifier = "now-playing"
+    ///
+    /// Each post gets its **own** identifier. A fixed one would be re-added as an
+    /// *update* of the card already delivered, and macOS then presents nothing in
+    /// the foreground — the banner would silently stop appearing. So the previous
+    /// card is removed by its identifier and the new one added under a fresh id;
+    /// presentation never depends on a remove-then-add ordering. The one-off clear
+    /// in `attach()` drops whatever an earlier launch (or a crash mid-post) left.
+    static let identifierPrefix = "now-playing"
 
     /// `false` for a bare SwiftPM binary; see the note above.
     static var isAvailable: Bool { Bundle.main.bundleIdentifier != nil }
@@ -35,9 +39,16 @@ final class NowPlayingNotifier {
     private var cancellables = Set<AnyCancellable>()
     private var lastTrackID: UUID?
     private var pending: Task<Void, Never>?
-    /// The first track after launch is the state the app opens in, not a *change*
-    /// — no banner for it.
-    private var primed = false
+    /// Serial for the per-post identifier; see `identifierPrefix`.
+    private var postSerial = 0
+    /// The card the next post replaces.
+    private var lastPostedIdentifier: String?
+    /// Guards `attach()` against a second live subscription; see `detach`.
+    private var installed = false
+    /// Test seam: when set, a post reports here instead of touching the
+    /// notification centre, so the self-test can drive `schedule` without a
+    /// bundle id or a real banner. Nil in the app.
+    var onAnnounce: ((Track) -> Void)?
 
     init(player: PlayerEngine,
          isEnabled: @escaping () -> Bool = { true },
@@ -50,10 +61,21 @@ final class NowPlayingNotifier {
     /// Starts watching the player. Permission and the delegate belong to
     /// `NotificationBridge`, which runs at launch. Safe to call more than once.
     func attach() {
+        // Idempotent, like `MediaCenter.attach`: a second live subscription would
+        // double the sink, and the two would cancel each other's pending banner.
+        guard !installed else { return }
         guard Self.isAvailable else {
             NSLog("音乐: notifications need a bundled app; skipping (no bundle id)")
             return
         }
+        installed = true
+
+        // Clear anything an earlier launch (or a crash mid-post) left in Centre;
+        // this app posts nothing but the now-playing card. Done once here rather
+        // than on every post, so `post` never races a clear against its own add.
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        lastPostedIdentifier = nil
+
         player.$currentTrack
             .removeDuplicates { $0?.id == $1?.id }
             .receive(on: RunLoop.main)
@@ -69,33 +91,40 @@ final class NowPlayingNotifier {
         pending?.cancel()
         pending = nil
         cancellables.removeAll()
+        installed = false
     }
 
     // MARK: - Posting
 
-    /// Waits for the selection to stop moving, then posts once.
-    private func schedule(_ track: Track?) {
-        pending?.cancel()
-        pending = nil
+    /// Waits for the selection to stop moving, then posts once. Internal rather
+    /// than private so the self-test can drive the debounce directly — `attach()`
+    /// bails without a bundle id, so it cannot reach this from a test binary.
+    func schedule(_ track: Track?) {
         guard let track else {
+            pending?.cancel()
+            pending = nil
             lastTrackID = nil
             return
         }
+        // A repeat of the current track must not cancel the banner already queued
+        // for it — so the dedupe guard runs *before* the cancel, not after.
         guard track.id != lastTrackID else { return }
         lastTrackID = track.id
 
-        // The first track is the state the app opens in — a restored session, or
-        // the one `--autoplay` starts — not a *change*. Priming here rather than
-        // after the `isPlaying` test matters: `start()` publishes the track just
-        // before it flips `isPlaying`, so a prime behind that guard would be
-        // consumed by the first real skip instead.
-        guard primed else {
-            primed = true
+        // Paused or stopped: nothing to announce. This — not a "first track"
+        // flag — is what keeps a restored session silent: `restore()` sets
+        // `currentTrack` but leaves `isPlaying` false, so the deferred delivery
+        // arrives while paused. A track the user actually starts arrives with
+        // `isPlaying` already true, because `start()` flips it before
+        // `receive(on:)` delivers — so an empty launch's first play banners too.
+        guard player.isPlaying else {
+            pending?.cancel()
+            pending = nil
             return
         }
-        // Paused or stopped: nothing to announce.
-        guard player.isPlaying else { return }
 
+        pending?.cancel()
+        pending = nil
         pending = Task { [weak self] in
             try? await Task.sleep(for: Self.settleDelay)
             guard !Task.isCancelled else { return }
@@ -105,12 +134,22 @@ final class NowPlayingNotifier {
 
     private func post(_ track: Track) {
         guard isEnabled(), player.isPlaying else { return }
+        if let onAnnounce {
+            onAnnounce(track)
+            return
+        }
         let content = Self.content(for: track, artwork: artwork(track))
-        let request = UNNotificationRequest(identifier: Self.requestIdentifier,
-                                           content: content,
-                                           trigger: nil)
+        postSerial += 1
+        let identifier = "\(Self.identifierPrefix).\(postSerial)"
+        let request = UNNotificationRequest(identifier: identifier,
+                                           content: content, trigger: nil)
         let centre = UNUserNotificationCenter.current()
-        centre.removeAllDeliveredNotifications()
+        // Replace the card this post supersedes. The new request already has a
+        // fresh id, so it presents even while this removal is still in flight.
+        if let previous = lastPostedIdentifier {
+            centre.removeDeliveredNotifications(withIdentifiers: [previous])
+        }
+        lastPostedIdentifier = identifier
         centre.add(request) { error in
             if let error {
                 NSLog("音乐: notification failed – \(error.localizedDescription)")
@@ -140,11 +179,15 @@ final class NowPlayingNotifier {
     /// missing tags never shows a dangling dash.
     ///
     /// The banner grows a row when the second line wraps, which breaks the
-    /// two-line shape; a long album name is trimmed to keep it.
-    /// Measured in *cells*, not characters: a CJK glyph is about twice as wide as
-    /// a Latin one, so counting characters lets 「ずっと真夜中でいいのに。 — …」
-    /// wrap into a third row while 44 Latin letters would still fit.
-    static let secondaryLineLimit = 44
+    /// two-line shape; a long line is trimmed to keep it. Measured in *cells*,
+    /// not characters: a CJK glyph is about twice as wide as a Latin one (so a
+    /// 20-glyph Japanese line and a 40-letter English one are both ~40 cells).
+    ///
+    /// 28 is calibrated to the *narrow* end of the banner's text area: a 40-cell
+    /// all-ASCII line such as `ASIAN KUNG-FU GENERATION — Wonder Future` slipped
+    /// under the old 44-cell budget and still wrapped onto a third row, so 44 was
+    /// ~1.5× too generous. 28 keeps the two-line shape at the font sizes in use.
+    static let secondaryLineLimit = 28
 
     static func cellWidth(of text: String) -> Int {
         text.unicodeScalars.reduce(into: 0) { total, scalar in
@@ -172,16 +215,34 @@ final class NowPlayingNotifier {
         let joined = parts.joined(separator: " — ")
         guard cellWidth(of: joined) > secondaryLineLimit else { return joined }
 
-        // Leave room for the ellipsis itself (two cells).
-        var trimmed = ""
-        var cells = 0
-        for character in joined {
-            let width = cellWidth(of: String(character))
-            if cells + width > secondaryLineLimit - 2 { break }
-            trimmed.append(character)
-            cells += width
+        // Keep `artist — album` when the artist still fits: trim the album, not
+        // the whole line, so a long album does not turn into a dangling dash.
+        let artistPart = parts.count == 2 ? parts[0] + " — " : ""
+        let artistCells = cellWidth(of: artistPart)
+        let albumRoom = secondaryLineLimit - 2 - artistCells
+        if parts.count == 2, albumRoom >= 6 {
+            let album = truncate(parts[1], to: albumRoom)
+            return artistPart + album + "…"
         }
-        return trimmed.trimmingCharacters(in: .whitespaces) + "…"
+        return truncate(joined, to: secondaryLineLimit - 2) + "…"
+    }
+
+    /// Cuts `text` to at most `cells` display cells, never leaving a separator or
+    /// a stray space at the end (「ASIAN KUNG-FU GENERATION —…」 reads as a typo).
+    private static func truncate(_ text: String, to cells: Int) -> String {
+        var kept = ""
+        var used = 0
+        for character in text {
+            let width = cellWidth(of: String(character))
+            if used + width > cells { break }
+            kept.append(character)
+            used += width
+        }
+        let separators = CharacterSet(charactersIn: " \u{2014}\u{2013}-–")
+        while let last = kept.unicodeScalars.last, separators.contains(last) {
+            kept.unicodeScalars.removeLast()
+        }
+        return kept
     }
 
     /// The banner's artwork slot is ~40 pt wide; a 160 px square is already more
@@ -197,12 +258,14 @@ final class NowPlayingNotifier {
         let scale = min(1, attachmentPixel / max(source.width, source.height))
         let target = NSSize(width: max(1, (source.width * scale).rounded()),
                             height: max(1, (source.height * scale).rounded()))
-        let out = NSImage(size: target)
-        out.lockFocus()
-        NSGraphicsContext.current?.imageInterpolation = .high
-        image.draw(in: NSRect(origin: .zero, size: target), from: .zero, operation: .copy, fraction: 1)
-        out.unlockFocus()
-        return out
+        // `lockFocus` is deprecated; `drawingHandler` draws at the image's own
+        // 1× size, so the PNG on disk is `target` pixels, not 2× that on a
+        // Retina display.
+        return NSImage(size: target, flipped: false) { rect in
+            NSGraphicsContext.current?.imageInterpolation = .high
+            image.draw(in: rect, from: .zero, operation: .copy, fraction: 1)
+            return true
+        }
     }
 
     private static func write(_ image: NSImage?) -> URL? {
@@ -259,22 +322,26 @@ extension NowPlayingNotifier {
         let centre = UNUserNotificationCenter.current()
         centre.getNotificationSettings { settings in
             print("notify: authorization=\(settings.authorizationStatus.rawValue) alertStyle=\(settings.alertStyle.rawValue) sound=\(settings.soundSetting.rawValue)")
-            let content = UNMutableNotificationContent()
-            content.title = "通知自检"
-            content.subtitle = "歌手 — 专辑"
-            let request = UNNotificationRequest(identifier: Self.requestIdentifier,
-                                                content: content,
-                                                trigger: nil)
+            func banner(_ title: String, _ subtitle: String) -> UNMutableNotificationContent {
+                let content = UNMutableNotificationContent()
+                content.title = title
+                content.subtitle = subtitle
+                return content
+            }
+            // Distinct identifiers, like the real posts: the second would be
+            // swallowed as an update if it reused the first's id.
+            let firstID = "\(Self.identifierPrefix).diag-1"
+            let secondID = "\(Self.identifierPrefix).diag-2"
             centre.removeAllDeliveredNotifications()
-            centre.add(request) { error in
-                print("notify: add \(error == nil ? "ok" : "failed – \(error!.localizedDescription)")")
-                // A second post must replace the first, leaving one card.
-                let second = UNMutableNotificationContent()
-                second.title = "通知自检 2"
-                second.subtitle = "只应留下这一条"
-                centre.removeAllDeliveredNotifications()
-                centre.add(UNNotificationRequest(identifier: Self.requestIdentifier,
-                                                 content: second,
+            centre.add(UNNotificationRequest(identifier: firstID,
+                                             content: banner("通知自检", "歌手 — 专辑"),
+                                             trigger: nil)) { error in
+                print("notify: add \(error == nil ? "ok" : "failed – \(error?.localizedDescription ?? "unknown")")")
+                // Remove the first by id; the second keeps its own, so exactly one
+                // card is left regardless of when the removal lands.
+                centre.removeDeliveredNotifications(withIdentifiers: [firstID])
+                centre.add(UNNotificationRequest(identifier: secondID,
+                                                 content: banner("通知自检 2", "只应留下这一条"),
                                                  trigger: nil)) { _ in
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                         centre.getDeliveredNotifications { delivered in

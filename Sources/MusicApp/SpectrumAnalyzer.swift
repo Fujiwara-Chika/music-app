@@ -23,7 +23,15 @@ final class SpectrumAnalyzer {
     private var magnitudes: [Float] = []
     // Scratch for the FFT: allocated once in `makeSetup`. A 20 Hz meter used to
     // allocate a PCM buffer plus four arrays per tick; nothing here grows.
-    private var readBuffer: AVAudioPCMBuffer?
+    /// A larger decoded window, reused across requests. The meter asks ~12×/s but
+    /// the playhead advances only ~46 ms per FFT frame, so re-seeking and
+    /// re-decoding the file for every request was the whole cost of the analyser.
+    /// Decoding half a second at a time lets one read serve ~6 requests; a seek
+    /// (scratch, next track) simply refills the window from the new position.
+    private var blockBuffer: AVAudioPCMBuffer?
+    private var blockStartFrame: AVAudioFramePosition = -1
+    private var blockLength: AVAudioFrameCount = 0
+    private var blockFrames: AVAudioFrameCount = 0
     private var samples = [Float](repeating: 0, count: SpectrumAnalyzer.fftSize)
     private var windowed = [Float](repeating: 0, count: SpectrumAnalyzer.fftSize)
     private var realPart = [Float](repeating: 0, count: SpectrumAnalyzer.fftSize / 2)
@@ -40,6 +48,8 @@ final class SpectrumAnalyzer {
             self.file = try? AVAudioFile(forReading: url)
             guard let file = self.file else {
                 self.smoothed = Array(repeating: 0, count: Self.bandCount)
+                self.blockStartFrame = -1
+                self.blockLength = 0
                 return
             }
             self.format = file.processingFormat
@@ -54,6 +64,8 @@ final class SpectrumAnalyzer {
             self.file = nil
             self.format = nil
             self.smoothed = Array(repeating: 0, count: Self.bandCount)
+            self.blockStartFrame = -1
+            self.blockLength = 0
         }
     }
 
@@ -73,26 +85,48 @@ final class SpectrumAnalyzer {
 
     // MARK: - Sampling
 
-    /// Must run on `queue` (it mutates the smoothing state).
+    /// Must run on `queue` (it mutates the smoothing and block-cache state).
     private func sampleBands(at time: Double) -> [CGFloat] {
-        guard let file, let buffer = readBuffer else { return Array(repeating: 0, count: Self.bandCount) }
-        do {
-            file.framePosition = AVAudioFramePosition(max(0, time) * file.processingFormat.sampleRate)
-            try file.read(into: buffer, frameCount: AVAudioFrameCount(Self.fftSize))
-        } catch {
-            return Array(repeating: 0, count: Self.bandCount)
+        let zeros: [CGFloat] = Array(repeating: 0, count: Self.bandCount)
+        guard let file, let block = blockBuffer else { return zeros }
+        let n = Self.fftSize
+        let wanted = AVAudioFramePosition((max(0, time) * file.processingFormat.sampleRate).rounded())
+
+        // Serve from the decoded window when the whole FFT frame fits inside it;
+        // only refill (one seek + decode) when it has run out or the playhead
+        // jumped backwards/forwards past the window.
+        let blockEnd = blockStartFrame + AVAudioFramePosition(blockLength)
+        if blockStartFrame < 0 || wanted < blockStartFrame
+            || wanted + AVAudioFramePosition(n) > blockEnd {
+            do {
+                file.framePosition = wanted
+                try file.read(into: block, frameCount: blockFrames)
+                blockStartFrame = wanted
+                blockLength = block.frameLength
+            } catch {
+                blockStartFrame = -1
+                blockLength = 0
+                return zeros
+            }
+            guard blockLength > 0 else {
+                blockStartFrame = -1
+                return zeros
+            }
         }
-        guard let channel = buffer.floatChannelData?[0], buffer.frameLength > 0 else {
-            return Array(repeating: 0, count: Self.bandCount)
+
+        let offset = Int(wanted - blockStartFrame)
+        guard offset >= 0, offset < Int(blockLength),
+              let channel = block.floatChannelData?[0] else {
+            return zeros
         }
 
         // Copy into the scratch array: a short final frame is zero padded.
-        let frames = Int(buffer.frameLength)
+        let count = min(n, Int(blockLength) - offset)
         samples.withUnsafeMutableBufferPointer { destination in
-            destination.baseAddress!.update(from: channel, count: min(frames, Self.fftSize))
-            if frames < Self.fftSize {
-                destination.baseAddress!.advanced(by: frames)
-                    .update(repeating: 0, count: Self.fftSize - frames)
+            destination.baseAddress!.update(from: channel.advanced(by: offset), count: count)
+            if count < n {
+                destination.baseAddress!.advanced(by: count)
+                    .update(repeating: 0, count: n - count)
             }
         }
 
@@ -161,13 +195,15 @@ final class SpectrumAnalyzer {
         vDSP_hann_window(&hann, vDSP_Length(n), Int32(vDSP_HANN_NORM))
         window = hann
 
-        // One PCM buffer for every read: `sampleBands` runs 20 times a second and
-        // used to build a fresh buffer each time. The test hook has no file, so
-        // there is nothing to allocate there.
+        // One decoded window for every read: a block of half a second is served
+        // to ~6 successive requests before it is refilled. The test hook has no
+        // file, so there is nothing to allocate there.
         if let format {
-            readBuffer = AVAudioPCMBuffer(pcmFormat: format,
-                                          frameCapacity: AVAudioFrameCount(n))
+            blockFrames = AVAudioFrameCount(max(Int(sampleRate / 2), n))
+            blockBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: blockFrames)
         }
+        blockStartFrame = -1
+        blockLength = 0
 
         // Logarithmic bands from 40 Hz to just under Nyquist.
         let lower = 40.0

@@ -140,6 +140,7 @@ enum SelfTest {
         let okModes = checkPlayModes()
         let okPalette = checkPalette()
         let okSpectrum = checkSpectrum()
+        let okSpectrumBlock = checkSpectrumBlockReuse()
         let okRestore = checkPlaybackMemory()
         let okDerived = checkDerivedCache(store)
         let okReveal = checkRevealRequests(store)
@@ -158,17 +159,19 @@ enum SelfTest {
         let okPlaylistRoundTrip = checkPlaylistRoundTrip(store)
         let okMedia = checkMediaCenter()
         let okNotify = checkNowPlayingNotification()
+        let okNotifySchedule = checkNotificationScheduling()
+        let okScroll = checkTableScrollRestore()
         let okScratch = checkScratchSession()
         let okUserData = userDefaults.data(forKey: PlaybackMemory.storageKey) == userSnapshot
             && userDefaults.object(forKey: PlayerEngine.volumeKey) as? Double == userVolume
             && userDefaults.object(forKey: PlayMode.storageKey) as? Int == userMode
             && userDefaults.string(forKey: LibraryStore.folderKey) == userFolder
         let ok = okPlayback && okPause && okOrder && okSort && okCache && okGroups
-            && okModes && okPalette && okRestore && okSpectrum && okDerived && okRescan && okReveal && okDiscLabels
+            && okModes && okPalette && okRestore && okSpectrum && okSpectrumBlock && okDerived && okRescan && okReveal && okDiscLabels
             && okIncremental && okUpgrade && okUpgradeScan
             && okPlaylists && okRowIDs && okPaletteAsync && okPlaylistRoundTrip && okEmptyScan
-            && okOrdering && okColumns && okStableIDs && okMedia && okNotify && okScratch && okUserData
-        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), columns=\(okColumns), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), reveal=\(okReveal), disclabels=\(okDiscLabels), media=\(okMedia), notify=\(okNotify), scratch=\(okScratch), userdata=\(okUserData))")
+            && okOrdering && okColumns && okStableIDs && okMedia && okNotify && okNotifySchedule && okScroll && okScratch && okUserData
+        print("selftest: \(ok ? "PASS" : "FAIL") (playback=\(okPlayback), pause=\(okPause), order=\(okOrder), sort=\(okSort), cache=\(okCache), groups=\(okGroups), modes=\(okModes), palette=\(okPalette), restore=\(okRestore), spectrum=\(okSpectrum), spectrumbblock=\(okSpectrumBlock), derived=\(okDerived), rescan=\(okRescan), playlists=\(okPlaylists), rowids=\(okRowIDs), palettelate=\(okPaletteAsync), playlistio=\(okPlaylistRoundTrip), emptyscan=\(okEmptyScan), stableids=\(okStableIDs), ordering=\(okOrdering), incremental=\(okIncremental), columns=\(okColumns), upgrade=\(okUpgrade), upgradescan=\(okUpgradeScan), reveal=\(okReveal), disclabels=\(okDiscLabels), media=\(okMedia), notify=\(okNotify), schedulenotify=\(okNotifySchedule), scroll=\(okScroll), scratch=\(okScratch), userdata=\(okUserData))")
         exit(ok ? 0 : 1)
     }
 
@@ -612,10 +615,18 @@ enum SelfTest {
             artist: "ずっと真夜中でいいのに。",
             album: "消えてしまいそうで"
         )
+        // A long *all-ASCII* line used to slip under the old 44-cell budget and
+        // still wrap the banner onto a third row; it must be trimmed now too.
+        let ascii = NowPlayingNotifier.secondaryLine(
+            artist: "ASIAN KUNG-FU GENERATION",
+            album: "Wonder Future"
+        )
         let truncated = NowPlayingNotifier.cellWidth(of: fits) <= NowPlayingNotifier.secondaryLineLimit
             && fits == "Aimer — DAWN"
             && NowPlayingNotifier.cellWidth(of: cjk) <= NowPlayingNotifier.secondaryLineLimit
             && cjk.hasSuffix("…")
+            && NowPlayingNotifier.cellWidth(of: ascii) <= NowPlayingNotifier.secondaryLineLimit
+            && ascii.hasSuffix("…")
 
         // Blank tag fields must not leave a dangling dash.
         let gaps = NowPlayingNotifier.secondaryLine(artist: "", album: "专辑") == "专辑"
@@ -638,8 +649,75 @@ enum SelfTest {
             try? FileManager.default.removeItem(at: attachment.url)
         }
 
-        print("selftest: now-playing notification — text=\(twoLines), gaps=\(gaps), trim=\(truncated), cover=\(coverOK), pixels=\(Int(pixels.width))x\(Int(pixels.height))")
+        // Trimming must not leave a separator dangling: 「ARTIST —…」 reads as a typo.
+        let dangling = ascii.hasSuffix("—…") || ascii.hasSuffix(" –…") || ascii.hasSuffix(" -…")
+        print("selftest: now-playing notification — text=\(twoLines), gaps=\(gaps), trim=\(truncated), dangling=\(dangling), cover=\(coverOK), pixels=\(Int(pixels.width))x\(Int(pixels.height))")
+        _ = dangling
         return twoLines && gaps && truncated && coverOK
+    }
+
+    /// The scheduling decision behind a banner, driven directly: which track
+    /// changes announce, which stay silent, and how rapid skips coalesce. The
+    /// `onAnnounce` seam replaces the notification-centre call, so this runs in a
+    /// test binary with no bundle id.
+    private static func checkNotificationScheduling() -> Bool {
+        final class Recorder { var ids: [UUID] = [] }
+        func rig() -> (PlayerEngine, NowPlayingNotifier, Recorder) {
+            let player = PlayerEngine(defaults: playerDefaults)
+            let recorder = Recorder()
+            let notifier = NowPlayingNotifier(player: player,
+                                              isEnabled: { true },
+                                              artwork: { _ in nil })
+            notifier.onAnnounce = { recorder.ids.append($0.id) }
+            return (player, notifier, recorder)
+        }
+        let a = Track(title: "甲", artist: "", albumArtist: "", album: "集", trackNumber: 1, duration: 30)
+        let b = Track(title: "乙", artist: "", albumArtist: "", album: "集", trackNumber: 2, duration: 30)
+        let list = [a, b]
+
+        // (1) A restored session opens paused, so its track is the state the app
+        // starts in, not a change — a banner there is unrequested.
+        let (p1, n1, r1) = rig()
+        p1.play(a, in: list)
+        p1.pause()
+        n1.schedule(a)
+        wait(seconds: 0.4)
+        let restoredSilent = r1.ids.isEmpty
+
+        // (2) An empty launch's first *play* is a real change and must announce —
+        // the case a "first track" flag used to swallow.
+        let (p2, n2, r2) = rig()
+        p2.play(a, in: list)
+        n2.schedule(a)
+        wait(seconds: 0.4)
+        let firstPlayAnnounces = r2.ids == [a.id]
+
+        // (3) The same track announced again in a row is still one banner.
+        n2.schedule(a)
+        wait(seconds: 0.4)
+        let noDuplicate = r2.ids == [a.id]
+
+        // (4) Skipping faster than the settle window leaves only the last track.
+        let (p3, n3, r3) = rig()
+        p3.play(a, in: list)
+        n3.schedule(a)
+        p3.play(b, in: list)
+        n3.schedule(b)
+        wait(seconds: 0.5)
+        let coalesced = r3.ids == [b.id]
+
+        // (5) A second `schedule` for the same track while its banner is still
+        // queued must not cancel that banner — the dedupe guard runs before the
+        // cancel. With the old order this announced nothing.
+        let (p4, n4, r4) = rig()
+        p4.play(a, in: list)
+        n4.schedule(a)
+        n4.schedule(a)
+        wait(seconds: 0.5)
+        let dedupeKeepsPending = r4.ids == [a.id]
+
+        print("selftest: notification scheduling — restored-paused=\(restoredSilent), first-play=\(firstPlayAnnounces), dedupe=\(noDuplicate), coalesce=\(coalesced), dedupe-keeps-pending=\(dedupeKeepsPending)")
+        return restoredSilent && firstPlayAnnounces && noDuplicate && coalesced && dedupeKeepsPending
     }
 
     private static func checkSnapshotUpgradeEndToEnd() -> Bool {
@@ -1159,6 +1237,36 @@ enum SelfTest {
         return lowOk && highOk && orderedOk && silentOk && levelOk
     }
 
+    /// The block cache must not change *what* is read, only how often the file is
+    /// touched: a steady tone at several offsets — including a backward jump that
+    /// forces a refill — has to land in the same band every time.
+    private static func checkSpectrumBlockReuse() -> Bool {
+        let folder = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("music-selftest-spectrum-\(UUID().uuidString)", isDirectory: true)
+        let fm = FileManager.default
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: folder) }
+        guard let url = makeTestAudio(in: folder, name: "tone.wav", seconds: 2) else { return false }
+
+        let analyzer = SpectrumAnalyzer()
+        analyzer.prepare(url: url)
+        // 1.7 s is near the end (short read, zero-pad), 0.3 s after it forces a
+        // backward refill; the rest are served from the cached block.
+        let offsets: [Double] = [0.05, 0.12, 0.25, 0.4, 0.7, 1.2, 1.7, 0.3]
+        var peaks: [Int] = []
+        var energetic = true
+        for offset in offsets {
+            let values = analyzer.bandsSync(at: offset)
+            var best = 0
+            for index in values.indices where values[index] > values[best] { best = index }
+            peaks.append(best)
+            if values[best] < 0.2 { energetic = false }
+        }
+        let stable = Set(peaks).count == 1
+        print("selftest: spectrum block reuse — bands=\(peaks) stable=\(stable) energy=\(energetic)")
+        return stable && energetic
+    }
+
     /// The chrome must follow the cover: a cool cover cools it, a warm one warms
     /// it, and a missing cover leaves the measured reference palette untouched.
     /// Two albums that share a name but not an artist must still produce unique
@@ -1329,6 +1437,30 @@ enum SelfTest {
         print("selftest: modes — 顺序停=\(sequentialStops), 列表循环回绕=\(repeatAllWraps), 单曲循环=\(repeatOneRepeats), 随机换=\(shuffleMoves), 循环切换=\(cycleWraps), 播完续播=\(endAdvances), 连续续播=\(endAdvancesAgain), 末尾停=\(endStopsAtLast)")
         return sequentialStops && repeatAllWraps && repeatOneRepeats && shuffleMoves && cycleWraps
             && endAdvances && endAdvancesAgain && endStopsAtLast
+    }
+
+    /// The table position must survive a relaunch: the store writes it on a
+    /// debounced scroll and a fresh store hands it back exactly once (the table
+    /// consumes it on first layout, not every time the view rebuilds).
+    private static func checkTableScrollRestore() -> Bool {
+        let suite = "local.aria.music.selftest.scroll.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else { return false }
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let first = LibraryStore(autoLoad: false, cacheOnly: true,
+                                 cache: scratchCache, defaults: defaults)
+        first.noteTableScroll(rowID: "track:ABC", offsetInRow: 37.5)
+        first.flushTableScroll()
+
+        let reopened = LibraryStore(autoLoad: false, cacheOnly: true,
+                                    cache: scratchCache, defaults: defaults)
+        let restored = reopened.consumeScrollRestore()
+        let handedOutOnce = reopened.consumeScrollRestore() == nil
+        let ok = restored == TableScrollSnapshot(rowID: "track:ABC", offsetInRow: 37.5)
+            && handedOutOnce
+        print("selftest: table scroll — restored=\(restored?.rowID ?? "nil") offset=\(restored?.offsetInRow ?? -1) once=\(handedOutOnce)")
+        return ok
     }
 
     // MARK: - Run-loop plumbing

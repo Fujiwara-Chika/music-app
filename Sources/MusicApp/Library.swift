@@ -26,6 +26,15 @@ enum TableRow: Identifiable {
     }
 }
 
+/// Where the song table was scrolled when the app last closed. Stored as the id of
+/// the top-most row plus how far that row is scrolled above the viewport, which
+/// survives rows being inserted or removed above it (a rescan) far better than a
+/// raw pixel offset would.
+struct TableScrollSnapshot: Codable, Equatable {
+    var rowID: String
+    var offsetInRow: Double
+}
+
 // MARK: - Store
 
 @MainActor
@@ -103,11 +112,18 @@ final class LibraryStore: ObservableObject {
     /// a scan runs, so a rescan must not take its "previous" state from there.
     private var lastCompleteTracks: [Track] = []
     private var saveTask: Task<Void, Never>?
+    /// Debounced writer for the table's scroll position; see `noteTableScroll`.
+    private var scrollSaveWork: DispatchWorkItem?
+    private var lastTableScroll: TableScrollSnapshot?
+    /// Loaded from disk at launch, handed to the table once on first populate.
+    private var pendingScrollRestore: TableScrollSnapshot?
     /// Where the imported folder and the small preferences live. Injected so the
     /// self test can point a store at a scratch suite instead of the user's.
     private let defaults: UserDefaults
     /// Exposed so the self-test can point a store at a scratch folder.
     static let folderKey = "library.folder.path"
+    /// Where the table's scroll position is kept so launch restores it.
+    static let scrollKey = "table.verticalScroll"
     /// Stable `path → id` map, independent of what the last scan happened to
     /// see. `lastCompleteTracks` cannot serve this purpose: an empty scan wipes
     /// it, which is exactly when playlist membership needs the ids back.
@@ -141,6 +157,7 @@ final class LibraryStore: ObservableObject {
          cache: SnapshotWriter = SnapshotWriter(), defaults: UserDefaults = .standard) {
         self.cache = cache
         self.defaults = defaults
+        pendingScrollRestore = Self.decodeTableScroll(defaults)
         guard autoLoad else { return }
         // A cold start shows an empty library with an "import" call to action.
         // The demo albums exist only to match the reference screenshot, and they
@@ -854,6 +871,44 @@ final class LibraryStore: ObservableObject {
             lastCompleteTracks[mirror] = tracks[idx]
         }
         scheduleSave()
+    }
+
+    // MARK: - Table scroll (restored across launches)
+
+    /// Persists the table's top row so the next launch opens where this one was
+    /// left. Called on every scroll, debounced — a fling would otherwise write a
+    /// dozen times a second.
+    func noteTableScroll(rowID: String, offsetInRow: Double) {
+        let snapshot = TableScrollSnapshot(rowID: rowID, offsetInRow: offsetInRow)
+        lastTableScroll = snapshot
+        scrollSaveWork?.cancel()
+        let defaults = self.defaults
+        let work = DispatchWorkItem { Self.writeTableScroll(snapshot, to: defaults) }
+        scrollSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    /// Flushes a scroll made in the last 400 ms; called on quit.
+    func flushTableScroll() {
+        scrollSaveWork?.cancel()
+        scrollSaveWork = nil
+        if let lastTableScroll { Self.writeTableScroll(lastTableScroll, to: defaults) }
+    }
+
+    /// The scroll to apply on launch, handed out once — `nil` after the first call.
+    func consumeScrollRestore() -> TableScrollSnapshot? {
+        defer { pendingScrollRestore = nil }
+        return pendingScrollRestore
+    }
+
+    private static func writeTableScroll(_ snapshot: TableScrollSnapshot, to defaults: UserDefaults) {
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        defaults.set(data, forKey: scrollKey)
+    }
+
+    private static func decodeTableScroll(_ defaults: UserDefaults) -> TableScrollSnapshot? {
+        guard let data = defaults.data(forKey: scrollKey) else { return nil }
+        return try? JSONDecoder().decode(TableScrollSnapshot.self, from: data)
     }
 
     /// Writes the snapshot right now. Used when the app is about to quit: the
